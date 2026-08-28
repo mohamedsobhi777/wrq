@@ -20,9 +20,8 @@ Once a paper is in the library, opening it does not require a network request.
 `wrq` keeps human-visible PDFs and schema-versioned JSON records on disk, with
 no account, database server, or shell integration.
 
-> **Project status:** `wrq` is being prepared for its first `0.1.0` release.
-> Install from source or with Nix/Homebrew HEAD until `wrq-cli` is published to
-> RubyGems.
+> **Project status:** `wrq` 0.1.0 is available from source, Nix, and Homebrew.
+> RubyGems publishing will follow once trusted publishing is configured.
 
 ## Why wrq
 
@@ -109,14 +108,16 @@ Home Manager:
 The module installs the package and exports `WRQ_PATH`. It does not inject a
 shell function or use `eval`.
 
-### Homebrew HEAD
+### Homebrew
 
-Tap this repository explicitly, then install its head formula:
+Tap this repository explicitly, then install the stable release:
 
 ```bash
 brew tap mohamedsobhi777/wrq https://github.com/mohamedsobhi777/wrq
-brew install --HEAD mohamedsobhi777/wrq/wrq
+brew install mohamedsobhi777/wrq/wrq
 ```
+
+Pass `--HEAD` to `brew install` if you want the latest development build.
 
 ## Quick start
 

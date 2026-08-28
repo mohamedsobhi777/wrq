@@ -1,0 +1,20 @@
+{
+  "id": "1706.03762",
+  "title": "Attention Is All You Need",
+  "summary": "The Transformer uses attention without recurrence.",
+  "ai_summary": "Introduces the Transformer architecture.",
+  "authors": [
+    {"name": "Ashish Vaswani", "user": "avaswani"},
+    {"name": "Noam Shazeer"},
+    "Niki Parmar"
+  ],
+  "upvotes": 4242,
+  "projectPage": "https://example.test/transformer",
+  "githubRepo": "https://github.com/example/transformer",
+  "organization": {"name": "Example Research"},
+  "mediaUrls": ["https://example.test/diagram.png"],
+  "models": [{"id": "example/transformer"}],
+  "datasets": [{"id": "example/corpus"}],
+  "spaces": [{"id": "example/demo"}],
+  "futureField": {"kept": true}
+}

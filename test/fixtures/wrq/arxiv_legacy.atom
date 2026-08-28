@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <entry>
+    <id>http://arxiv.org/abs/hep-th/9901001v2</id>
+    <updated>1999-01-04T12:00:00Z</updated>
+    <published>1999-01-04T12:00:00Z</published>
+    <title>A Legacy Identifier Paper</title>
+    <summary>A legacy fixture.</summary>
+    <author><name>Example Author</name></author>
+    <category term="hep-th"/>
+    <arxiv:primary_category term="hep-th"/>
+    <link title="pdf" href="http://arxiv.org/pdf/hep-th/9901001v2" type="application/pdf"/>
+  </entry>
+</feed>

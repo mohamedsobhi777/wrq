@@ -9,7 +9,7 @@ module Wrq
     MODERN_ID_RE = /\A(\d{2})(0[1-9]|1[0-2])\.(\d{4,5})(?:v([1-9]\d*))?\z/i
     LEGACY_ID_RE = /\A([a-z][a-z0-9.-]*)\/(\d{2})(0[1-9]|1[0-2])(\d{3})(?:v([1-9]\d*))?\z/i
     ARXIV_URL_RE = %r{\Ahttps?://(?:(?:www|export)\.)?arxiv\.org/(?:abs|pdf|html)/([^?#]+)(?:[?#].*)?\z}i
-    HF_URL_RE = %r{\Ahttps?://(?:www\.)?huggingface\.co/papers/([^/?#]+(?:/[^/?#]+)?)/?(?:[?#].*)?\z}i
+    HF_URL_RE = %r{\Ahttps?://(?:www\.)?(?:huggingface\.co|hf\.co)/papers/([^/?#]+(?:/[^/?#]+)?)/?(?:[?#].*)?\z}i
     SHA256_RE = /\A(?:sha256:)?([0-9a-f]{64})\z/i
 
     attr_reader :base_id, :version, :original, :provider
@@ -29,6 +29,7 @@ module Wrq
 
       candidate = extract_candidate(original)
       candidate = candidate.sub(/\.pdf\z/i, "")
+      candidate = candidate.sub(/\.md\z/i, "")
       candidate = candidate.sub(/\/$/, "")
       candidate = candidate.sub(/\Aarxiv:\s*/i, "")
       base_id, version = parse_id(candidate)
@@ -168,12 +169,12 @@ module Wrq
     end
 
     def without_version
-      self.class.new(base_id: @base_id, provider: @provider)
+      Identity.new(base_id: @base_id, provider: @provider)
     end
 
     def with_version(version)
       raise InvalidIdentity, "local identities cannot have versions" if local?
-      self.class.new(base_id: @base_id, version: version, provider: @provider)
+      Identity.new(base_id: @base_id, version: version, provider: @provider)
     end
 
     def to_h

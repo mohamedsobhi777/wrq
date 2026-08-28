@@ -16,6 +16,9 @@ arXiv requests use one connection at a time and a persistent minimum
 three-second interval. Responses are cached. A useful project User-Agent and
 the official acknowledgement are included. PDFs are for the user's local
 personal/research library and are not served or redistributed by `wrq`.
+Normal lookups may use a stale validated cache entry while offline. An explicit
+`wrq update` bypasses the cache and reports provider failure rather than
+claiming that stale metadata was refreshed.
 
 ## Hugging Face Papers
 
@@ -32,4 +35,3 @@ redirect to another host.
 
 All automated source tests use checked-in Atom, JSON, and PDF fixtures or a
 local fake transport. CI must not depend on live provider availability.
-

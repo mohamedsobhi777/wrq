@@ -23,6 +23,8 @@ wrapper or `eval`.
 - `wrq <hugging-face-paper-url>` extracts the base arXiv identifier and follows
   the same flow. Hugging Face enrichment is optional and never blocks storage.
 - `wrq <other text>` opens the selector with that local fuzzy-search query.
+- Multi-term queries may satisfy different terms in different indexed fields,
+  such as an author surname plus a conference name.
 - Only complete recognized identifiers and URLs trigger network access.
 
 ## Commands
@@ -50,4 +52,3 @@ wrapper or `eval`.
 - `0`: requested operation completed.
 - `1`: operational failure, invalid local state, or cancelled interaction.
 - `2`: invalid command-line usage.
-

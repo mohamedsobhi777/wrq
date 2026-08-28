@@ -18,6 +18,10 @@ module Wrq
   class CLI
     COMMANDS = %w[add open search import info meta dedupe update remove doctor].freeze
     MAX_PDF_BYTES = 512 * 1024 * 1024
+    ABANDONED_TEMP_AGE = 60 * 60
+    USER_OWNED_METADATA_FIELDS = %w[
+      venue year track status decision publication_doi tags provenance
+    ].freeze
 
     HELP = <<~TEXT
       wrq v#{VERSION} - local-first research paper library
@@ -63,11 +67,11 @@ module Wrq
 
       Environment:
         WRQ_PATH          Library root (default: ~/papers)
-        WRQ_OPENER        Viewer executable (default: open/xdg-open/start)
+          WRQ_OPENER        Viewer executable (default: open/xdg-open/explorer)
         HF_TOKEN          Optional Hugging Face token for higher quotas
     TEXT
 
-    def initialize(stdout: STDOUT, stderr: STDERR, stdin: STDIN, env: ENV,
+    def initialize(stdout: STDOUT, stderr: STDERR, stdin: STDIN, env: nil,
                    library: nil, arxiv_source: nil, hugging_face_source: nil,
                    opener: nil, selector_class: Selector, clock: nil)
       @stdout = stdout
@@ -79,7 +83,7 @@ module Wrq
       @hugging_face_override = hugging_face_source
       @opener = opener || Opener.new(env: env)
       @selector_class = selector_class
-      @clock = clock || proc { Time.now }
+      @clock = clock
       @options = {}
     end
 
@@ -97,10 +101,13 @@ module Wrq
       end
 
       Tui.disable_colors! if @options[:no_colors]
-      Tui.disable_colors! if !@env['NO_COLOR'].to_s.empty?
+      Tui.disable_colors! if !environment_value('NO_COLOR').to_s.empty?
 
       command = args.shift
       return browse("") if command.nil?
+      if command.start_with?("-")
+        raise UsageError, "unknown option: #{command}"
+      end
 
       case command
       when "add" then command_add(args)
@@ -163,7 +170,9 @@ module Wrq
       while index < args.length
         argument = args[index]
         if argument == name
-          raise UsageError, "#{name} requires a value" unless args[index + 1]
+          unless args[index + 1] && !args[index + 1].start_with?("-")
+            raise UsageError, "#{name} requires a value"
+          end
           found = args[index + 1]
           args.slice!(index, 2)
           next
@@ -191,7 +200,9 @@ module Wrq
     def extract_first_value!(args, name)
       args.each_with_index do |argument, index|
         if argument == name
-          raise UsageError, "#{name} requires a value" unless args[index + 1]
+          unless args[index + 1] && !args[index + 1].start_with?("-")
+            raise UsageError, "#{name} requires a value"
+          end
           value = args[index + 1]
           args.slice!(index, 2)
           return value
@@ -211,10 +222,17 @@ module Wrq
 
     def arxiv_source
       return @arxiv_override if @arxiv_override
+      default_arxiv_source
+    end
+
+    def default_arxiv_source
       @arxiv_source ||= begin
         library.prepare!
         throttle_path = File.join(library.paths.cache, "arxiv-api.throttle")
-        Sources::Arxiv.new(throttle: Throttle.new(path: throttle_path))
+        Sources::Arxiv.new(
+          throttle: Throttle.new(path: throttle_path),
+          cache_path: library.paths.cache
+        )
       end
     end
 
@@ -229,6 +247,7 @@ module Wrq
     end
 
     def command_add(args)
+      reject_unknown_options!(args)
       raise UsageError, "add requires one paper reference" if args.empty?
       raise UsageError, "add accepts one paper reference" if args.length > 1
       identity = Identity.parse(args.first)
@@ -237,19 +256,22 @@ module Wrq
     end
 
     def command_open(args)
-      raise UsageError, "open requires a selector" if args.empty?
-      paper = resolve_one(args.join(" "))
-      return not_found(args.join(" ")) unless paper
+      reject_unknown_options!(args)
+      selector = selector_argument(args, "open")
+      paper = resolve_one(selector)
+      return not_found(selector) unless paper
       finish_paper(paper)
     end
 
     def command_search(args)
+      reject_unknown_options!(args)
       browse(args.join(" "))
     end
 
     def command_import(args)
       recursive = extract_flag!(args, "--recursive")
       move = extract_flag!(args, "--move")
+      reject_unknown_options!(args)
       raise UsageError, "import requires at least one PDF file or directory" if args.empty?
 
       files = collect_pdf_files(args, recursive: recursive)
@@ -272,7 +294,7 @@ module Wrq
           identity: identity && identity.without_version,
           version: identity && identity.version,
           metadata: metadata,
-          aliases: [source, File.basename(source)],
+          aliases: [],
           move: move
         )
         row = ingest_result_hash(result).merge("source" => source)
@@ -288,9 +310,10 @@ module Wrq
     end
 
     def command_info(args)
-      raise UsageError, "info requires a selector" if args.empty?
-      paper = resolve_one(args.join(" "))
-      return not_found(args.join(" ")) unless paper
+      reject_unknown_options!(args)
+      selector = selector_argument(args, "info")
+      paper = resolve_one(selector)
+      return not_found(selector) unless paper
 
       payload = paper_payload(paper)
       if @options[:json]
@@ -310,8 +333,8 @@ module Wrq
       publication_doi = extract_value!(args, "--doi")
       add_tags = extract_values!(args, "--tag")
       remove_tags = extract_values!(args, "--remove-tag")
-      raise UsageError, "meta requires a selector" if args.empty?
-      selector = args.join(" ")
+      reject_unknown_options!(args)
+      selector = selector_argument(args, "meta")
       paper = resolve_one(selector)
       return not_found(selector) unless paper
 
@@ -330,20 +353,28 @@ module Wrq
         changes["publication_doi"] = doi
       end
 
-      tags = Array(paper.metadata["tags"]).map(&:to_s)
-      add_tags.each { |tag| tags << tag unless tags.include?(tag) }
-      remove_tags.each { |tag| tags.delete(tag) }
-      changes["tags"] = tags unless add_tags.empty? && remove_tags.empty?
-      if changes.empty?
+      if changes.empty? && add_tags.empty? && remove_tags.empty?
         raise UsageError, "meta requires at least one metadata option"
       end
 
-      provenance = paper.metadata["provenance"]
-      provenance = {} unless provenance.is_a?(Hash)
-      changes.keys.each { |key| provenance[key] = "manual" unless key == "tags" }
-      changes["provenance"] = provenance
-      paper.merge_metadata!(changes)
-      library.save(paper)
+      paper = library.update(paper.key) do |fresh|
+        transaction_changes = changes.dup
+        unless add_tags.empty? && remove_tags.empty?
+          tags = Array(fresh.metadata["tags"]).map(&:to_s)
+          add_tags.each { |tag| tags << tag unless tags.include?(tag) }
+          remove_tags.each { |tag| tags.delete(tag) }
+          transaction_changes["tags"] = tags
+        end
+
+        provenance = fresh.metadata["provenance"]
+        provenance = provenance.is_a?(Hash) ? provenance.dup : {}
+        transaction_changes.keys.each do |key|
+          provenance[key] = "manual" unless key == "tags"
+        end
+        transaction_changes["provenance"] = provenance
+        fresh.merge_metadata!(transaction_changes)
+      end
+      raise Error, "paper disappeared while updating metadata" unless paper
 
       if @options[:json]
         emit_json(paper_payload(paper))
@@ -355,30 +386,52 @@ module Wrq
 
     def command_dedupe(args)
       recursive = extract_flag!(args, "--recursive")
+      reject_unknown_options!(args)
       raise UsageError, "dedupe accepts at most one path" if args.length > 1
 
       papers = library.papers
       hash_groups = {}
       papers.each do |paper|
+        seen_paths = {}
         paper.assets.each do |asset|
+          path = library.asset_path(asset)
+          next if seen_paths[path]
+          seen_paths[path] = true
           hash_groups[asset.sha256] ||= []
           hash_groups[asset.sha256] << {
             "paper" => paper.key,
-            "path" => library.asset_path(asset),
+            "path" => path,
             "version" => asset.version
           }
         end
       end
       exact = hash_groups.select { |_hash, values| values.length > 1 }
 
-      title_groups = {}
+      logical_groups = {}
       papers.each do |paper|
-        normalized = normalize_title(paper.title)
-        next if normalized.empty?
-        title_groups[normalized] ||= []
-        title_groups[normalized] << paper.key
+        logical_identity_tokens(paper).each do |token|
+          logical_groups[token] ||= []
+          logical_groups[token] << paper.key unless logical_groups[token].include?(paper.key)
+        end
       end
-      probable = title_groups.select { |_title, keys| keys.uniq.length > 1 }
+      logical = logical_groups.select { |_token, keys| keys.length > 1 }
+
+      probable = {}
+      papers.each_with_index do |paper, index|
+        later = index + 1
+        while later < papers.length
+          candidate = papers[later]
+          if probable_duplicate?(paper, candidate)
+            left = normalize_title(paper.title)
+            right = normalize_title(candidate.title)
+            label = left == right ? left : "#{left} <> #{right}"
+            probable[label] ||= []
+            probable[label] << paper.key unless probable[label].include?(paper.key)
+            probable[label] << candidate.key unless probable[label].include?(candidate.key)
+          end
+          later += 1
+        end
+      end
 
       external = []
       unless args.empty?
@@ -395,6 +448,7 @@ module Wrq
       end
 
       report = {
+        "logical_identity_groups" => logical,
         "exact_hash_groups" => exact,
         "probable_title_groups" => probable,
         "external_files" => external,
@@ -411,13 +465,14 @@ module Wrq
     def command_update(args)
       update_all = extract_flag!(args, "--all")
       enrich_hf = extract_flag!(args, "--hf")
+      reject_unknown_options!(args)
       if update_all
         raise UsageError, "update --all does not accept a selector" unless args.empty?
         papers = library.papers.select { |paper| paper.identity.arxiv? }
       else
-        raise UsageError, "update requires a selector or --all" if args.empty?
-        paper = resolve_one(args.join(" "))
-        return not_found(args.join(" ")) unless paper
+        selector = selector_argument(args, "update", suffix: " or --all")
+        paper = resolve_one(selector)
+        return not_found(selector) unless paper
         raise Error, "local-only papers cannot be updated from arXiv" unless paper.identity.arxiv?
         papers = [paper]
       end
@@ -435,8 +490,8 @@ module Wrq
 
     def command_remove(args)
       yes = extract_flag!(args, "--yes")
-      raise UsageError, "remove requires a selector" if args.empty?
-      selector = args.join(" ")
+      reject_unknown_options!(args)
+      selector = selector_argument(args, "remove")
       paper = resolve_one(selector)
       return not_found(selector) unless paper
 
@@ -462,6 +517,7 @@ module Wrq
 
     def command_doctor(args)
       fix = extract_flag!(args, "--fix")
+      reject_unknown_options!(args)
       raise UsageError, "doctor does not accept positional arguments" unless args.empty?
       report = doctor_report(fix: fix)
       if @options[:json]
@@ -488,7 +544,11 @@ module Wrq
         return finish_paper(paper)
       end
 
-      result = @selector_class.new(records, query: query).run
+      result = if defined?(RubyVM) && @selector_class != Selector
+        @selector_class.new(records, query: query).run
+      else
+        Selector.new(records, query: query).run
+      end
       case result[:action]
       when :select
         finish_paper(result[:record])
@@ -512,6 +572,9 @@ module Wrq
       canonical = Identity.parse(metadata[:base_id]).without_version
       resolved_version = metadata[:resolved_version] || identity.version
       record_metadata = arxiv_record_metadata(metadata)
+      record_metadata["tags"] = []
+      record_metadata["status"] = "unread"
+      record_metadata["added_at"] = timestamp
 
       if hugging_face_reference?(reference)
         begin
@@ -525,7 +588,7 @@ module Wrq
       library.prepare!
       temporary = library.paths.temporary_path("arxiv-download")
       begin
-        arxiv_source.download(metadata, destination: temporary, max_bytes: MAX_PDF_BYTES)
+        download_arxiv_pdf(metadata, temporary)
         result = library.ingest_pdf(
           identity: canonical,
           source_path: temporary,
@@ -549,9 +612,16 @@ module Wrq
     end
 
     def refresh_paper(paper, enrich_hf: false)
-      metadata = arxiv_source.fetch(paper.identity.base_id)
+      metadata = arxiv_source.refresh(paper.identity.base_id)
       resolved_version = metadata[:resolved_version]
       record_metadata = arxiv_record_metadata(metadata)
+      existing_provider_data = paper.metadata["provider_data"]
+      if existing_provider_data.is_a?(Hash)
+        record_metadata["provider_data"] = deep_merge_hashes(
+          existing_provider_data,
+          record_metadata["provider_data"] || {}
+        )
+      end
       if enrich_hf || paper.metadata.dig("provider_data", "hugging_face")
         begin
           hf = hugging_face_source.fetch(paper.identity.base_id)
@@ -561,16 +631,28 @@ module Wrq
         end
       end
 
+      # Provider refreshes update provider-owned fields only. These fields are
+      # curated by the user (including an initially inferred DOI), so once a
+      # record exists they must never be silently replaced by upstream data.
+      provenance = paper.metadata["provenance"]
+      provenance = {} unless provenance.is_a?(Hash)
+      USER_OWNED_METADATA_FIELDS.each do |key|
+        next if key == "publication_doi" && provenance[key] != "manual"
+        record_metadata.delete(key)
+      end
+
       existing = resolved_version && paper.asset_for_version(resolved_version)
       downloaded = false
       if existing && File.file?(library.asset_path(existing))
-        paper.merge_metadata!(record_metadata)
-        paper.add_aliases!(Array(metadata[:aliases]))
-        library.save(paper)
+        paper = library.update(paper.key) do |fresh|
+          fresh.merge_metadata!(record_metadata)
+          fresh.add_aliases!(Array(metadata[:aliases]))
+        end
+        raise Error, "paper disappeared while refreshing metadata" unless paper
       else
         temporary = library.paths.temporary_path("arxiv-update")
         begin
-          arxiv_source.download(metadata, destination: temporary, max_bytes: MAX_PDF_BYTES)
+          download_arxiv_pdf(metadata, temporary)
           result = library.ingest_pdf(
             identity: paper.identity,
             source_path: temporary,
@@ -591,14 +673,28 @@ module Wrq
       { "key" => paper.key, "version" => resolved_version, "downloaded" => downloaded }
     end
 
+    def download_arxiv_pdf(metadata, destination)
+      if defined?(RubyVM) && @arxiv_override
+        @arxiv_override.download(
+          metadata,
+          destination: destination,
+          max_bytes: MAX_PDF_BYTES
+        )
+      else
+        source = default_arxiv_source
+        source.download(
+          metadata,
+          destination: destination,
+          max_bytes: MAX_PDF_BYTES
+        )
+      end
+    end
+
     def finish_paper(paper, asset: nil)
       asset ||= paper.current_asset
       raise Error, "paper has no stored PDF: #{paper.key}" unless asset
       path = library.asset_path(asset)
       raise Error, "stored PDF is missing: #{path}" unless File.file?(path)
-
-      paper.merge_metadata!({ "last_opened_at" => timestamp }) unless @options[:no_open]
-      library.save(paper)
 
       if @options[:json]
         emit_json(paper_payload(paper).merge("selected_path" => path))
@@ -607,7 +703,38 @@ module Wrq
       elsif @options[:no_open]
         @stdout.puts("Stored: #{path}")
       else
-        @opener.open(path)
+        original_asset = paper.current_asset
+        activated = library.activate_asset(
+          paper.key,
+          version: asset.version,
+          sha256: asset.sha256
+        )
+        raise Error, "paper disappeared while opening" unless activated
+        selected = activated.asset_for_version(asset.version)
+        selected ||= activated.asset_for_hash(asset.sha256)
+        raise Error, "selected PDF disappeared while opening" unless selected
+        path = library.asset_path(selected)
+        begin
+          opened = @opener.open(path)
+          raise Error, "paper opener did not start" unless opened
+        rescue StandardError, Interrupt
+          begin
+            if original_asset
+              library.activate_asset(
+                paper.key,
+                version: original_asset.version,
+                sha256: original_asset.sha256
+              )
+            end
+          rescue StandardError
+          end
+          raise
+        end
+        paper = activated
+        paper = library.update(paper.key) do |fresh|
+          fresh.merge_metadata!({ "last_opened_at" => timestamp })
+        end
+        raise Error, "paper disappeared while recording open" unless paper
         @stdout.puts("Opened: #{paper.key}")
       end
       0
@@ -615,12 +742,20 @@ module Wrq
 
     def resolve_one(selector)
       value = selector.to_s.strip
+      return nil if value.empty?
       exact = library.find(value)
       return exact if exact
-      return nil if value.empty? && library.papers.empty?
 
       result = Search.new(library.papers, now: now).call(value, limit: 1).first
       result && result.record
+    end
+
+    def selector_argument(args, command, suffix: "")
+      value = args.join(" ").strip
+      if value.empty?
+        raise UsageError, "#{command} requires a selector#{suffix}"
+      end
+      value
     end
 
     def arxiv_record_metadata(metadata)
@@ -636,9 +771,6 @@ module Wrq
         record[key.to_s] = deep_stringify(value) unless value.nil?
       end
       record["provider_data"] = deep_stringify(metadata[:provider_data] || {})
-      record["tags"] ||= []
-      record["status"] ||= "unread"
-      record["added_at"] ||= timestamp
       record
     end
 
@@ -648,7 +780,9 @@ module Wrq
       provider_data = {} unless provider_data.is_a?(Hash)
       hf_provider = hf[:provider_data] || hf["provider_data"] || { "hugging_face" => hf }
       hf_provider = deep_stringify(hf_provider)
-      provider_data.merge!(hf_provider)
+      hf_provider.each do |key, value|
+        provider_data[key] = value
+      end
       merged["provider_data"] = provider_data
 
       {
@@ -753,56 +887,189 @@ module Wrq
       value.to_s.downcase.gsub(/[^a-z0-9]+/, " ").strip
     end
 
+    def logical_identity_tokens(paper)
+      tokens = [paper.key.downcase]
+      paper.aliases.each do |paper_alias|
+        normalized = paper_alias.to_s.strip.downcase
+        next if normalized.empty?
+        identity = Identity.recognize(paper_alias)
+        tokens << (identity ? identity.canonical_key : "alias:#{normalized}")
+      end
+      tokens.uniq
+    end
+
+    def probable_duplicate?(left, right)
+      left_title = normalize_title(left.title)
+      right_title = normalize_title(right.title)
+      return false if left_title.empty? || right_title.empty?
+
+      title_match = left_title == right_title || title_token_similarity(left_title, right_title) >= 0.7
+      return false unless title_match
+
+      left_authors = normalized_authors(left)
+      right_authors = normalized_authors(right)
+      return true if left_authors.empty? || right_authors.empty?
+
+      left_authors.any? do |author|
+        right_authors.any? { |candidate| authors_match?(author, candidate) }
+      end
+    end
+
+    def title_token_similarity(left, right)
+      left_tokens = left.split(" ").uniq
+      right_tokens = right.split(" ").uniq
+      union = (left_tokens + right_tokens).uniq
+      return 0.0 if union.empty?
+      shared = left_tokens.count { |token| right_tokens.include?(token) }
+      shared.to_f / union.length
+    end
+
+    def normalized_authors(paper)
+      paper.authors.map do |author|
+        author.to_s.downcase.gsub(/[^a-z0-9]+/, " ").strip
+      end.reject(&:empty?).uniq
+    end
+
+    def authors_match?(left, right)
+      return true if left == right
+      left_parts = left.split(" ")
+      right_parts = right.split(" ")
+      !left_parts.empty? && !right_parts.empty? && left_parts[-1] == right_parts[-1]
+    end
+
     def doctor_report(fix: false)
-      library.prepare!
       errors = []
       warnings = []
       checked_records = 0
       checked_assets = 0
+      removed = 0
+      catalog = library
+      current_time = now.to_f
 
-      entries = Dir.entries(library.paths.records).select { |name| name.end_with?(".json") }.sort
-      entries.each do |name|
-        path = File.join(library.paths.records, name)
-        begin
-          paper = MetadataCodec.read(path)
-          checked_records += 1
-          paper.assets.each do |asset|
-            checked_assets += 1
-            asset_path = library.asset_path(asset)
-            unless File.file?(asset_path)
-              errors << "missing asset for #{paper.key}: #{asset_path}"
-              next
-            end
-            actual = library.sha256(asset_path)
-            errors << "hash mismatch for #{paper.key}: #{asset_path}" unless actual == asset.sha256
-          end
-        rescue StandardError => error
-          errors << "invalid record #{path}: #{error.message}"
-        end
-      end
-
-      abandoned = Dir.entries(library.paths.tmp).select do |name|
-        name != "." && name != ".." && File.file?(File.join(library.paths.tmp, name))
-      end
-      if fix
-        abandoned.each do |name|
+      catalog.with_lock do
+        referenced_paths = {}
+        alias_owners = {}
+        entries = Dir.entries(catalog.paths.records).select { |name| name.end_with?(".json") }.sort
+        entries.each do |name|
+          path = File.join(catalog.paths.records, name)
           begin
-            File.delete(File.join(library.paths.tmp, name))
-          rescue SystemCallError => error
-            errors << "could not remove temporary file #{name}: #{error.message}"
+            if File.symlink?(path)
+              raise UnsafePath, "record file is a symlink"
+            end
+            stat = File.lstat(path)
+            unless stat.file? && stat.nlink == 1
+              raise UnsafePath, "record file is not a regular single-link file"
+            end
+            paper = MetadataCodec.read(path)
+            expected = catalog.paths.record_path(paper.key)
+            unless File.expand_path(path) == File.expand_path(expected)
+              raise InvalidRecord, "filename does not match canonical key #{paper.key}"
+            end
+            checked_records += 1
+
+            paper.aliases.each do |paper_alias|
+              alias_identity = Identity.recognize(paper_alias)
+              token = if alias_identity
+                        alias_identity.canonical_key
+                      else
+                        "alias:#{paper_alias.to_s.strip.downcase}"
+                      end
+              alias_owners[token] ||= []
+              alias_owners[token] << paper.key unless alias_owners[token].include?(paper.key)
+            end
+
+            paper.assets.each do |asset|
+              checked_assets += 1
+              asset_path = catalog.asset_path(asset)
+              referenced_paths[File.expand_path(asset_path)] = true
+              if File.symlink?(asset_path)
+                errors << "asset is a symlink for #{paper.key}: #{asset_path}"
+                next
+              end
+              unless File.file?(asset_path)
+                errors << "missing asset for #{paper.key}: #{asset_path}"
+                next
+              end
+              actual_size = File.size(asset_path)
+              if actual_size != asset.size
+                errors << "size mismatch for #{paper.key}: #{asset_path} (#{actual_size} != #{asset.size})"
+              end
+              header = File.open(asset_path, "rb") { |file| file.read(5).to_s }
+              unless header == "%PDF-"
+                errors << "invalid PDF signature for #{paper.key}: #{asset_path}"
+              end
+              actual = catalog.sha256(asset_path)
+              errors << "hash mismatch for #{paper.key}: #{asset_path}" unless actual == asset.sha256
+            end
+
+            active = paper.current_asset
+            if active && !active.path.start_with?("library/")
+              errors << "active asset is not visible for #{paper.key}: #{active.path}"
+            end
+            visible_paths = paper.assets.map(&:path).select { |value| value.start_with?("library/") }.uniq
+            if visible_paths.length > 1
+              errors << "multiple visible assets for #{paper.key}: #{visible_paths.join(', ')}"
+            end
+          rescue StandardError => error
+            errors << "invalid record #{path}: #{error.message}"
           end
         end
-      elsif !abandoned.empty?
-        warnings << "#{abandoned.length} abandoned temporary file(s)"
+
+        alias_owners.each do |token, owners|
+          if owners.length > 1
+            errors << "alias conflict #{token}: #{owners.join(', ')}"
+          end
+        end
+
+        [catalog.paths.library, catalog.paths.versions].each do |directory|
+          Dir.entries(directory).sort.each do |name|
+            next if name == "." || name == ".."
+            path = File.join(directory, name)
+            next unless name.downcase.end_with?(".pdf") || File.symlink?(path)
+            if File.symlink?(path)
+              errors << "managed PDF is a symlink: #{path}"
+            elsif File.file?(path) && !referenced_paths[File.expand_path(path)]
+              warnings << "orphan PDF: #{path}"
+            end
+          end
+        end
+
+        candidates = []
+        Dir.entries(catalog.paths.tmp).each do |name|
+          next if name == "." || name == ".."
+          path = File.join(catalog.paths.tmp, name)
+          candidates << path if File.file?(path) && !File.symlink?(path)
+        end
+        Dir.entries(catalog.paths.records).each do |name|
+          next unless name.include?(".tmp-")
+          path = File.join(catalog.paths.records, name)
+          candidates << path if File.file?(path) && !File.symlink?(path)
+        end
+        abandoned = candidates.select do |path|
+          current_time - File.mtime(path).to_f >= ABANDONED_TEMP_AGE
+        end.sort
+        if fix
+          abandoned.each do |path|
+            begin
+              File.delete(path)
+              removed += 1
+            rescue SystemCallError => error
+              errors << "could not remove temporary file #{path}: #{error.message}"
+            end
+          end
+        elsif !abandoned.empty?
+          warnings << "#{abandoned.length} abandoned temporary file(s)"
+        end
+        nil
       end
 
       {
-        "root" => library.root,
+        "root" => catalog.root,
         "checked_records" => checked_records,
         "checked_assets" => checked_assets,
         "errors" => errors,
         "warnings" => warnings,
-        "removed_temporary_files" => fix ? abandoned.length : 0
+        "removed_temporary_files" => removed
       }
     end
 
@@ -810,22 +1077,65 @@ module Wrq
       metadata = payload["metadata"] || {}
       @stdout.puts(metadata["title"].to_s.empty? ? payload["key"] : metadata["title"])
       @stdout.puts("ID: #{payload['key']}")
-      authors = Array(metadata["authors"])
-      @stdout.puts("Authors: #{authors.join(', ')}") unless authors.empty?
-      @stdout.puts("Venue: #{metadata['venue']}") if metadata["venue"]
-      @stdout.puts("Year: #{metadata['year']}") if metadata["year"]
-      @stdout.puts("Status: #{metadata['status']}") if metadata["status"]
-      @stdout.puts("DOI: #{metadata['publication_doi']}") if metadata["publication_doi"]
-      @stdout.puts("Tags: #{Array(metadata['tags']).join(', ')}") unless Array(metadata["tags"]).empty?
-      @stdout.puts("PDF: #{payload['current_path']}") if payload["current_path"]
-      @stdout.puts
-      @stdout.puts(metadata["abstract"]) if metadata["abstract"]
+      identity = payload["identity"] || {}
+      @stdout.puts("Provider: #{identity['provider']}") if identity["provider"]
+      @stdout.puts("Base ID: #{identity['base_id']}") if identity["base_id"]
+      @stdout.puts("Schema: #{payload['schema_version']}")
+      @stdout.puts("Created: #{payload['created_at']}")
+      @stdout.puts("Updated: #{payload['updated_at']}")
+      @stdout.puts("Active PDF: #{payload['current_path']}") if payload["current_path"]
+
+      @stdout.puts("Metadata:")
+      metadata.keys.sort.each do |key|
+        @stdout.puts("  #{info_label(key)}: #{info_value(metadata[key])}")
+      end
+
+      aliases = Array(payload["aliases"])
+      @stdout.puts("Aliases:")
+      if aliases.empty?
+        @stdout.puts("  (none)")
+      else
+        aliases.each { |paper_alias| @stdout.puts("  - #{paper_alias}") }
+      end
+
+      active = payload["active_asset"] || {}
+      @stdout.puts("Assets:")
+      Array(payload["assets"]).each do |asset|
+        selected = asset["sha256"] == active["sha256"] &&
+          asset["version"] == active["version"]
+        marker = selected ? "*" : "-"
+        version = asset["version"] ? "v#{asset['version']}" : "unversioned"
+        @stdout.puts("  #{marker} #{version}")
+        asset.keys.sort.each do |key|
+          next if key == "version"
+          @stdout.puts("      #{info_label(key)}: #{info_value(asset[key])}")
+        end
+      end
+    end
+
+    def info_label(key)
+      key.to_s.split("_").map { |part| part.capitalize }.join(" ")
+    end
+
+    def info_value(value)
+      if value.is_a?(Array) && value.all? { |item| !item.is_a?(Hash) && !item.is_a?(Array) }
+        value.empty? ? "(none)" : value.map(&:to_s).join(", ")
+      elsif value.is_a?(Hash) || value.is_a?(Array)
+        JSON.generate(value)
+      elsif value.nil?
+        "(none)"
+      else
+        value.to_s
+      end
     end
 
     def print_dedupe_report(report)
+      logical = report["logical_identity_groups"]
       exact = report["exact_hash_groups"]
       probable = report["probable_title_groups"]
       external = report["external_files"]
+      @stdout.puts("Logical identity conflicts: #{logical.length}")
+      logical.each { |token, keys| @stdout.puts("  #{token}: #{keys.join(', ')}") }
       @stdout.puts("Exact duplicate hash groups: #{exact.length}")
       exact.each { |hash, rows| @stdout.puts("  #{hash}: #{rows.map { |row| row['path'] }.join(', ')}") }
       @stdout.puts("Probable duplicate title groups: #{probable.length}")
@@ -850,6 +1160,11 @@ module Wrq
       @stdout.puts(JSON.pretty_generate(value))
     end
 
+    def reject_unknown_options!(args)
+      unknown = args.find { |argument| argument.start_with?("-") }
+      raise UsageError, "unknown option: #{unknown}" if unknown
+    end
+
     def not_found(selector)
       @stderr.puts("Error: no paper matches #{selector.inspect}")
       1
@@ -872,12 +1187,25 @@ module Wrq
       JSON.parse(JSON.generate(value))
     end
 
+    def deep_merge_hashes(base, updates)
+      merged = deep_copy(base)
+      updates.each do |key, value|
+        normalized_key = key.to_s
+        if merged[normalized_key].is_a?(Hash) && value.is_a?(Hash)
+          merged[normalized_key] = deep_merge_hashes(merged[normalized_key], value)
+        else
+          merged[normalized_key] = deep_copy(value)
+        end
+      end
+      merged
+    end
+
     def hugging_face_reference?(value)
       value.to_s.match?(%r{\Ahttps?://(?:www\.)?(?:huggingface\.co|hf\.co)/papers/}i)
     end
 
     def now
-      @clock.call
+      @clock ? @clock.call : Time.now
     end
 
     def timestamp
@@ -885,8 +1213,12 @@ module Wrq
     end
 
     def debug?
-      value = @env['WRQ_DEBUG'].to_s.downcase
+      value = environment_value('WRQ_DEBUG').to_s.downcase
       value == '1' || value == 'true' || value == 'yes'
+    end
+
+    def environment_value(name)
+      @env ? @env[name] : ENV[name]
     end
   end
 end

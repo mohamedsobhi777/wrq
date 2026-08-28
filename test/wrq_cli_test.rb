@@ -2,23 +2,27 @@
 
 require "tmpdir"
 require "fileutils"
+require "digest"
 require_relative "test_helper"
 require_relative "../lib/wrq/cli"
 
 class WrqCliTest < Minitest::Test
   class FakeArxiv
-    attr_reader :fetches, :downloads
+    attr_reader :fetches, :refreshes, :downloads
 
-    def initialize(latest_version: 7)
+    def initialize(latest_version: 7, publication_doi: nil)
       @latest_version = latest_version
+      @publication_doi = publication_doi
       @fetches = []
+      @refreshes = []
       @downloads = []
     end
 
-    def fetch(reference)
+    def fetch(reference, refresh: false)
       identity = Wrq::Identity.parse(reference)
       version = identity.version || @latest_version
       @fetches << identity.versioned_id
+      @refreshes << refresh
       {
         provider: "arxiv",
         canonical_key: identity.canonical_key,
@@ -36,12 +40,16 @@ class WrqCliTest < Minitest::Test
         updated_at: "2023-08-02T00:00:00Z",
         comment: "Accepted at NeurIPS 2017",
         journal_ref: nil,
-        publication_doi: nil,
+        publication_doi: @publication_doi,
         abstract_url: "https://arxiv.org/abs/#{identity.base_id}v#{version}",
         pdf_url: "https://arxiv.org/pdf/#{identity.base_id}v#{version}.pdf",
         aliases: [identity.base_id, "arXiv:#{identity.base_id}"],
         provider_data: { arxiv: { resolved_id: "#{identity.base_id}v#{version}" } }
       }
+    end
+
+    def refresh(reference)
+      fetch(reference, refresh: true)
     end
 
     def download(metadata, destination:, max_bytes: nil)
@@ -84,6 +92,12 @@ class WrqCliTest < Minitest::Test
     end
   end
 
+  class FailingHuggingFace
+    def fetch(_reference)
+      raise "temporary Hugging Face failure"
+    end
+  end
+
   class FakeOpener
     attr_reader :paths
 
@@ -94,6 +108,13 @@ class WrqCliTest < Minitest::Test
     def open(path)
       @paths << path
       true
+    end
+  end
+
+  class FailingOpener < FakeOpener
+    def open(path)
+      @paths << path
+      raise RuntimeError, "viewer unavailable"
     end
   end
 
@@ -175,6 +196,24 @@ class WrqCliTest < Minitest::Test
     assert_equal ["1706.03762v1", "1706.03762v2"], @arxiv.fetches
   end
 
+  def test_opening_an_exact_version_makes_it_the_active_local_asset
+    assert_equal 0, run_cli("add", "1706.03762v1", "--no-open").first
+    assert_equal 0, run_cli("add", "1706.03762v2", "--no-open").first
+    assert_equal 2, @library.find("1706.03762").current_asset.version
+
+    status, _output, error = run_cli("1706.03762v1")
+    assert_equal 0, status, error
+    paper = @library.find("1706.03762")
+    assert_equal 1, paper.current_asset.version
+    assert paper.asset_for_version(1).path.start_with?("library/")
+    assert paper.asset_for_version(2).path.start_with?(".wrq/versions/")
+
+    status, _output, error = run_cli("1706.03762")
+    assert_equal 0, status, error
+    assert @opener.paths.last.include?("-v1")
+    assert_equal 2, @arxiv.fetches.length
+  end
+
   def test_hugging_face_url_enriches_without_replacing_arxiv_authors
     status, = run_cli("https://huggingface.co/papers/1706.03762", "--no-open")
     assert_equal 0, status
@@ -200,6 +239,26 @@ class WrqCliTest < Minitest::Test
     refute File.exist?(second)
     assert_equal 1, @library.papers.length
     assert_equal 1, @library.papers.first.assets.length
+  end
+
+  def test_same_basename_imports_do_not_create_ambiguous_aliases
+    first_directory = File.join(@temporary, "source-a")
+    second_directory = File.join(@temporary, "source-b")
+    FileUtils.mkdir_p(first_directory)
+    FileUtils.mkdir_p(second_directory)
+    first = File.join(first_directory, "paper.pdf")
+    second = File.join(second_directory, "paper.pdf")
+    File.binwrite(first, "%PDF-1.4\nfirst paper\n")
+    File.binwrite(second, "%PDF-1.4\nsecond paper\n")
+
+    status, _output, error = run_cli("import", first, second)
+    assert_equal 0, status, error
+    assert_equal 2, @library.papers.length
+    refute @library.papers.any? { |paper| paper.aliases.include?("paper.pdf") }
+
+    status, output, error = run_cli("doctor", "--json")
+    assert_equal 0, status, error
+    assert_empty JSON.parse(output)["errors"]
   end
 
   def test_metadata_info_search_and_print_path
@@ -229,6 +288,42 @@ class WrqCliTest < Minitest::Test
     assert File.file?(output.strip)
   end
 
+  def test_human_info_includes_complete_metadata_and_asset_details
+    run_cli("1706.03762", "--no-open")
+    run_cli(
+      "meta", "1706.03762",
+      "--venue", "NeurIPS", "--track", "Main", "--decision", "accepted"
+    )
+
+    status, output, error = run_cli("info", "1706.03762")
+    assert_equal 0, status, error
+    assert_includes output, "Provider Data:"
+    assert_includes output, "Track: Main"
+    assert_includes output, "Decision: accepted"
+    assert_includes output, "Aliases:"
+    assert_includes output, "Assets:"
+    assert_includes output, "Sha256:"
+    assert_includes output, "Source Url:"
+    assert_includes output, "Created:"
+    assert_includes output, "Updated:"
+  end
+
+  def test_failed_opener_restores_the_previous_active_version
+    run_cli("add", "1706.03762v1", "--no-open")
+    run_cli("add", "1706.03762v2", "--no-open")
+    @opener = FailingOpener.new
+
+    status, _output, error = run_cli("1706.03762v1")
+    assert_equal 1, status
+    assert_includes error, "viewer unavailable"
+
+    paper = @library.find("1706.03762")
+    assert_equal 2, paper.current_asset.version
+    assert paper.asset_for_version(1).path.start_with?(".wrq/versions/")
+    assert paper.asset_for_version(2).path.start_with?("library/")
+    assert_nil paper.metadata["last_opened_at"]
+  end
+
   def test_arbitrary_query_never_uses_network
     path = write_pdf("graph-neural-networks.pdf")
     run_cli("import", path)
@@ -251,6 +346,60 @@ class WrqCliTest < Minitest::Test
     assert_equal [], report["deleted"]
   end
 
+  def test_probable_dedupe_requires_author_agreement_when_authors_are_known
+    first = write_pdf("first.pdf", "%PDF-1.4\nfirst\n")
+    second = write_pdf("second.pdf", "%PDF-1.4\nsecond\n")
+    @library.import_pdf(
+      source_path: first,
+      metadata: { "title" => "A Shared Research Title", "authors" => ["Alice Example"] }
+    )
+    @library.import_pdf(
+      source_path: second,
+      metadata: { "title" => "A Shared Research Title", "authors" => ["Bob Different"] }
+    )
+
+    status, output, error = run_cli("dedupe", "--json")
+    assert_equal 0, status, error
+    assert_empty JSON.parse(output)["probable_title_groups"]
+  end
+
+  def test_probable_dedupe_accepts_title_variation_with_shared_author
+    first = write_pdf("variation-one.pdf", "%PDF-1.4\none\n")
+    second = write_pdf("variation-two.pdf", "%PDF-1.4\ntwo\n")
+    @library.import_pdf(
+      source_path: first,
+      metadata: { "title" => "Efficient Transformers for Long Context", "authors" => ["A. Researcher"] }
+    )
+    @library.import_pdf(
+      source_path: second,
+      metadata: { "title" => "Efficient Transformers for Long Context Windows", "authors" => ["Ada Researcher"] }
+    )
+
+    status, output, error = run_cli("dedupe", "--json")
+    assert_equal 0, status, error
+    groups = JSON.parse(output)["probable_title_groups"]
+    assert groups.values.any? { |keys| keys.length == 2 }
+  end
+
+  def test_dedupe_reports_alias_conflicts_and_ignores_one_shared_physical_asset
+    first = write_pdf("logical-one.pdf", "%PDF-1.4\none\n")
+    second = write_pdf("logical-two.pdf", "%PDF-1.4\ntwo\n")
+    one = @library.import_pdf(source_path: first, aliases: ["shared-paper"])
+    two = @library.import_pdf(source_path: second, aliases: ["shared-paper"])
+
+    same_v1 = write_pdf("same-v1.pdf", "%PDF-1.4\nsame\n")
+    same_v2 = write_pdf("same-v2.pdf", "%PDF-1.4\nsame\n")
+    @library.ingest_pdf(identity: Wrq::Identity.parse("2401.01234v1"), source_path: same_v1)
+    @library.ingest_pdf(identity: Wrq::Identity.parse("2401.01234v2"), source_path: same_v2)
+
+    status, output, error = run_cli("dedupe", "--json")
+    assert_equal 0, status, error
+    report = JSON.parse(output)
+    assert_equal [one.paper.key, two.paper.key].sort,
+      report["logical_identity_groups"]["alias:shared-paper"].sort
+    assert_empty report["exact_hash_groups"]
+  end
+
   def test_update_downloads_only_a_new_version
     run_cli("1706.03762", "--no-open")
     @arxiv = FakeArxiv.new(latest_version: 8)
@@ -266,6 +415,57 @@ class WrqCliTest < Minitest::Test
     assert_equal 0, status, error
     assert_equal false, JSON.parse(output).first["downloaded"]
     assert_equal 1, @arxiv.downloads.length
+    assert_equal [true, true], @arxiv.refreshes
+  end
+
+  def test_update_preserves_all_user_owned_metadata
+    run_cli("1706.03762", "--no-open")
+    status, _output, error = run_cli(
+      "meta", "1706.03762",
+      "--venue", "NeurIPS", "--year", "2017", "--track", "Main",
+      "--status", "read", "--decision", "accepted",
+      "--doi", "10.5555/manual-doi", "--tag", "foundational"
+    )
+    assert_equal 0, status, error
+    before = @library.find("1706.03762").metadata
+    added_at = before["added_at"]
+
+    @arxiv = FakeArxiv.new(latest_version: 8)
+    status, _output, error = run_cli("update", "1706.03762")
+    assert_equal 0, status, error
+
+    metadata = @library.find("1706.03762").metadata
+    assert_equal "NeurIPS", metadata["venue"]
+    assert_equal 2017, metadata["year"]
+    assert_equal "Main", metadata["track"]
+    assert_equal "read", metadata["status"]
+    assert_equal "accepted", metadata["decision"]
+    assert_equal "10.5555/manual-doi", metadata["publication_doi"]
+    assert_equal ["foundational"], metadata["tags"]
+    assert_equal added_at, metadata["added_at"]
+    assert_equal "manual", metadata.dig("provenance", "publication_doi")
+  end
+
+  def test_update_refreshes_provider_owned_doi
+    run_cli("1706.03762", "--no-open")
+    @arxiv = FakeArxiv.new(latest_version: 7, publication_doi: "10.5555/provider-doi")
+
+    status, _output, error = run_cli("update", "1706.03762")
+    assert_equal 0, status, error
+    assert_equal "10.5555/provider-doi",
+      @library.find("1706.03762").metadata["publication_doi"]
+  end
+
+  def test_update_preserves_hugging_face_provider_data_on_transient_failure
+    run_cli("https://huggingface.co/papers/1706.03762", "--no-open")
+    assert_equal 42,
+      @library.find("1706.03762").metadata.dig("provider_data", "hugging_face", "upvotes")
+    @hf = FailingHuggingFace.new
+
+    status, _output, error = run_cli("update", "1706.03762")
+    assert_equal 0, status, error
+    assert_equal 42,
+      @library.find("1706.03762").metadata.dig("provider_data", "hugging_face", "upvotes")
   end
 
   def test_remove_requires_yes_and_uses_recoverable_trash
@@ -286,6 +486,9 @@ class WrqCliTest < Minitest::Test
     run_cli("1706.03762", "--no-open")
     abandoned = @library.paths.temporary_path("abandoned")
     File.write(abandoned, "partial")
+    File.utime(Time.at(0), Time.at(0), abandoned)
+    active = @library.paths.temporary_path("active-download")
+    File.write(active, "in progress")
 
     status, output, error = run_cli("doctor", "--json")
     assert_equal 0, status, error
@@ -298,6 +501,49 @@ class WrqCliTest < Minitest::Test
     assert_equal 0, status, error
     assert_equal 1, JSON.parse(output)["removed_temporary_files"]
     refute File.exist?(abandoned)
+    assert File.exist?(active)
+  end
+
+  def test_doctor_reports_size_signature_orphans_and_record_filename_mismatch
+    run_cli("1706.03762", "--no-open")
+    paper = @library.find("1706.03762")
+    asset_path = @library.asset_path(paper.current_asset)
+    File.binwrite(asset_path, "not a pdf")
+    orphan = File.join(@library.library_path, "orphan.pdf")
+    File.binwrite(orphan, "%PDF-1.4\norphan\n")
+
+    record_path = @library.paths.record_path(paper.key)
+    wrong_path = File.join(@library.paths.records, "wrong-name.json")
+    File.rename(record_path, wrong_path)
+
+    status, output, error = run_cli("doctor", "--json")
+    assert_equal 1, status, error
+    report = JSON.parse(output)
+    joined_errors = report["errors"].join("\n")
+    assert_includes joined_errors, "filename does not match canonical key"
+
+    File.rename(wrong_path, record_path)
+    status, output, error = run_cli("doctor", "--json")
+    assert_equal 1, status, error
+    report = JSON.parse(output)
+    joined_errors = report["errors"].join("\n")
+    assert_includes joined_errors, "size mismatch"
+    assert_includes joined_errors, "invalid PDF signature"
+    assert_includes joined_errors, "hash mismatch"
+    assert report["warnings"].any? { |warning| warning.include?("orphan PDF") }
+  end
+
+  def test_doctor_rejects_symlinked_records_without_following_them
+    run_cli("1706.03762", "--no-open")
+    paper = @library.find("1706.03762")
+    record_path = @library.paths.record_path(paper.key)
+    external = File.join(@temporary, "external.json")
+    File.rename(record_path, external)
+    File.symlink(external, record_path)
+
+    status, output, error = run_cli("doctor", "--json")
+    assert_equal 1, status, error
+    assert JSON.parse(output)["errors"].any? { |message| message.include?("symlink") }
   end
 
   def test_usage_errors_return_two
@@ -308,5 +554,29 @@ class WrqCliTest < Minitest::Test
     status, _output, error = run_cli("import")
     assert_equal 2, status
     assert_includes error, "requires at least one"
+
+    status, _output, error = run_cli("--bogus", "--json")
+    assert_equal 2, status
+    assert_includes error, "unknown option"
+
+    status, _output, error = run_cli("--path", "--json")
+    assert_equal 2, status
+    assert_includes error, "--path requires a value"
+
+    status, _output, error = run_cli("search", "attention", "--bogus")
+    assert_equal 2, status
+    assert_includes error, "unknown option"
+
+    [
+      ["open", " "],
+      ["info", " "],
+      ["meta", " ", "--status", "read"],
+      ["update", " "],
+      ["remove", " ", "--yes"]
+    ].each do |arguments|
+      status, _output, selector_error = run_cli(*arguments)
+      assert_equal 2, status, arguments.inspect
+      assert_includes selector_error, "requires a selector"
+    end
   end
 end

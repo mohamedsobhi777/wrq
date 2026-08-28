@@ -46,6 +46,23 @@ class WrqSearchTest < Minitest::Test
     assert_equal :canonical_id, results.first.matched_field
   end
 
+  def test_every_accepted_paper_url_form_exactly_matches_local_identity
+    record = { canonical_id: "arxiv:1706.03762", title: "Transformers" }
+    references = [
+      "https://arxiv.org/abs/1706.03762v7",
+      "https://arxiv.org/pdf/1706.03762v7.pdf",
+      "https://arxiv.org/html/1706.03762v7",
+      "https://huggingface.co/papers/1706.03762.md",
+      "https://hf.co/papers/1706.03762"
+    ]
+
+    references.each do |reference|
+      result = Wrq::Search.new([record]).call(reference).first
+      assert_equal record, result.record, reference
+      assert_equal :canonical_id, result.matched_field, reference
+    end
+  end
+
   def test_natural_spaces_match_and_title_positions_are_display_offsets
     record = { canonical_id: "1706.03762", title: "Attention Is All You Need" }
 
@@ -104,6 +121,22 @@ class WrqSearchTest < Minitest::Test
     assert_equal :canonical_id, exact.matched_field
     assert_equal :venue, venue.matched_field
     assert_equal "Attention Is All You Need", venue[:title]
+  end
+
+  def test_multi_term_query_can_match_across_research_metadata_fields
+    record = {
+      canonical_id: "arxiv:1706.03762",
+      title: "Attention Is All You Need",
+      authors: ["Ashish Vaswani"],
+      venue: "NeurIPS"
+    }
+
+    result = Wrq::Search.new([record]).call("vaswani neurips").first
+
+    assert_equal record, result.record
+    assert_equal :multiple, result.matched_field
+    assert_empty result.highlight_positions
+    assert_empty Wrq::Search.new([record]).call("vaswani icml")
   end
 
   def test_ties_have_a_deterministic_content_order

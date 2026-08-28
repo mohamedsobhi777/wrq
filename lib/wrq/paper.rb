@@ -61,6 +61,17 @@ module Wrq
       other.is_a?(Asset) && other.sha256 == @sha256
     end
 
+    def with_path(path)
+      Asset.new(
+        version: @version,
+        path: path,
+        sha256: @sha256,
+        size: @size,
+        source_url: @source_url,
+        added_at: @added_at
+      )
+    end
+
     def ==(other)
       other.is_a?(Asset) && other.to_h == to_h
     end
@@ -91,7 +102,7 @@ module Wrq
 
     def initialize(identity:, metadata: {}, aliases: [], assets: [],
                    created_at: nil, updated_at: nil, key: nil,
-                   schema_version: SCHEMA_VERSION)
+                   schema_version: SCHEMA_VERSION, active_asset: nil)
       unless schema_version == SCHEMA_VERSION
         raise InvalidRecord, "unsupported record schema: #{schema_version.inspect}"
       end
@@ -109,9 +120,11 @@ module Wrq
       add_aliases!(@identity.aliases, touch: false)
       add_aliases!(aliases, touch: false)
       @assets = []
+      @active_asset = nil
       assets.each do |asset|
         add_asset!(asset, touch: false)
       end
+      @active_asset = resolve_active_asset(active_asset) unless active_asset.nil?
       @created_at = created_at ? created_at.to_s : self.class.timestamp
       @updated_at = updated_at ? updated_at.to_s : @created_at
     end
@@ -139,7 +152,8 @@ module Wrq
         created_at: value["created_at"],
         updated_at: value["updated_at"],
         key: value["key"],
-        schema_version: schema
+        schema_version: schema,
+        active_asset: value["active_asset"]
       )
     end
 
@@ -193,6 +207,9 @@ module Wrq
       end
 
       @assets << asset
+      if @active_asset.nil? || (asset_rank(asset) <=> asset_rank(@active_asset)) == 1
+        @active_asset = asset
+      end
       touch! if touch
       asset
     end
@@ -207,7 +224,47 @@ module Wrq
     end
 
     def current_asset
-      @assets.max_by { |asset| [asset.version || 0, asset.added_at] }
+      @active_asset
+    end
+
+    def set_active_asset!(asset, touch: true)
+      match = find_matching_asset(asset)
+      raise InvalidRecord, "active asset does not belong to #{@key}" unless match
+
+      changed = !@active_asset.equal?(match)
+      @active_asset = match
+      touch! if changed && touch
+      match
+    end
+
+    def relocate_asset!(asset, path, touch: true)
+      match = find_matching_asset(asset)
+      raise InvalidRecord, "asset does not belong to #{@key}" unless match
+
+      relocate_asset_path!(match.path, path, touch: touch)
+      replacement = @assets.find do |candidate|
+        candidate.version == match.version && candidate.sha256 == match.sha256 &&
+          candidate.path == path.to_s
+      end
+      replacement
+    end
+
+    def relocate_asset_path!(old_path, new_path, touch: true)
+      replaced = false
+      active_replacement = nil
+      @assets = @assets.map do |candidate|
+        unless candidate.path == old_path.to_s
+          next candidate
+        end
+        replacement = candidate.with_path(new_path)
+        active_replacement = replacement if @active_asset.equal?(candidate)
+        replaced = true
+        replacement
+      end
+      raise InvalidRecord, "asset path does not belong to #{@key}" unless replaced
+      @active_asset = active_replacement if active_replacement
+      touch! if touch
+      self
     end
 
     def touch!(at = nil)
@@ -223,6 +280,7 @@ module Wrq
         "metadata" => @metadata,
         "aliases" => @aliases,
         "assets" => @assets.map(&:to_h),
+        "active_asset" => active_asset_reference,
         "created_at" => @created_at,
         "updated_at" => @updated_at,
       }
@@ -233,6 +291,44 @@ module Wrq
     end
 
     private
+
+    def active_asset_reference
+      return nil unless @active_asset
+
+      {
+        "sha256" => @active_asset.sha256,
+        "version" => @active_asset.version
+      }
+    end
+
+    def resolve_active_asset(reference)
+      unless reference.is_a?(Hash)
+        raise InvalidRecord, "active asset must be an object"
+      end
+      sha256 = reference["sha256"] || reference[:sha256]
+      version = if reference.key?("version")
+                  reference["version"]
+                else
+                  reference[:version]
+                end
+      match = @assets.find do |asset|
+        asset.sha256 == sha256.to_s.downcase && asset.version == version
+      end
+      raise InvalidRecord, "active asset does not match a stored asset" unless match
+      match
+    end
+
+    def find_matching_asset(asset)
+      return nil unless asset.is_a?(Asset)
+      @assets.find do |candidate|
+        candidate.version == asset.version && candidate.sha256 == asset.sha256 &&
+          candidate.path == asset.path
+      end
+    end
+
+    def asset_rank(asset)
+      [asset.version || 0, asset.added_at]
+    end
 
     def normalize_metadata(value)
       raise InvalidRecord, "paper metadata must be an object" unless value.is_a?(Hash)

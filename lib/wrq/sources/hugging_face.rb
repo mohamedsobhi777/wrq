@@ -22,6 +22,7 @@ module Wrq
       def initialize(http_client: nil, api_url: nil, token: nil)
         @api_url = (api_url || ENV["WRQ_HF_API_URL"] || API_URL).to_s.sub(%r{/+\z}, "")
         @token = token.nil? ? ENV["HF_TOKEN"] : token
+        @token_allowed = token_allowed_for_endpoint?
         @http = http_client || build_http_client
       end
 
@@ -58,6 +59,7 @@ module Wrq
         authors = hf_authors.map { |author| author[:name] }
         summary = value_from(paper, raw, "summary", "abstract")
         ai_summary = value_from(paper, raw, "ai_summary", "aiSummary", "aiGeneratedSummary")
+        ai_keywords = array_from(paper, raw, "ai_keywords", "aiKeywords", "keywords")
         project_page = value_from(paper, raw, "project_page", "projectPage")
         github_repo = value_from(paper, raw, "github_repo", "githubRepo", "github")
         organization = paper["organization"] || raw["organization"]
@@ -73,6 +75,7 @@ module Wrq
           authors: hf_authors,
           summary: summary,
           ai_summary: ai_summary,
+          ai_keywords: ai_keywords,
           upvotes: upvotes,
           project_page: project_page,
           github_repo: github_repo,
@@ -85,12 +88,11 @@ module Wrq
           raw: raw
         }
 
-        {
+        metadata = {
           provider: "hugging_face",
           canonical_key: "arxiv:#{resolved[:base_id]}",
           base_id: resolved[:base_id],
           requested_id: requested[:requested_id],
-          requested_version: requested[:requested_version],
           resolved_id: resolved[:resolved_id],
           resolved_version: resolved[:resolved_version],
           title: title,
@@ -99,6 +101,7 @@ module Wrq
           abstract: summary,
           summary: summary,
           ai_summary: ai_summary,
+          ai_keywords: ai_keywords,
           upvotes: upvotes,
           project_page: project_page,
           github_repo: github_repo,
@@ -111,6 +114,10 @@ module Wrq
           aliases: [requested[:requested_id], resolved[:base_id], hf_url].compact.uniq,
           provider_data: { hugging_face: enrichment }
         }
+        if requested[:has_requested_version]
+          metadata[:requested_version] = requested[:requested_version]
+        end
+        metadata
       rescue JSON::ParserError => error
         raise InvalidResponse, "invalid Hugging Face JSON response: #{error.message}"
       rescue Arxiv::InvalidIdentifier => error
@@ -138,8 +145,19 @@ module Wrq
       def request_headers
         headers = { "Accept" => "application/json" }
         token = @token.to_s.strip
-        headers["Authorization"] = "Bearer #{token}" unless token.empty?
+        if @token_allowed && !token.empty?
+          headers["Authorization"] = "Bearer #{token}"
+        end
         headers
+      end
+
+      def token_allowed_for_endpoint?
+        uri = URI.parse(@api_url)
+        host = uri.host.to_s.downcase
+        uri.scheme.to_s.downcase == "https" &&
+          ["huggingface.co", "www.huggingface.co"].include?(host)
+      rescue URI::InvalidURIError
+        false
       end
 
       def normalize_authors(value)

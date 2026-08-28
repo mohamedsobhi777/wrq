@@ -37,6 +37,18 @@ class WrqIdentityTest < Minitest::Test
     assert_equal 5, identity.version
   end
 
+  def test_recognizes_hugging_face_short_url_and_markdown_suffix
+    short = Wrq::Identity.parse("https://hf.co/papers/1706.03762")
+    markdown = Wrq::Identity.parse("https://huggingface.co/papers/1706.03762.md")
+
+    assert_equal "1706.03762", short.base_id
+    assert_equal "1706.03762", markdown.base_id
+  end
+
+  def test_rejects_noncanonical_six_digit_modern_sequences
+    assert_raises(Wrq::InvalidIdentity) { Wrq::Identity.parse("9912.123456v2") }
+  end
+
   def test_aliases_include_versionless_key_and_source_urls
     identity = Wrq::Identity.parse("https://arxiv.org/abs/1706.03762v2")
 

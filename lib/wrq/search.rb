@@ -1,5 +1,8 @@
 # frozen_string_literal: true
 
+require_relative "identity"
+require_relative "paper"
+
 module Wrq
   # Weighted, field-aware fuzzy search for paper records.
   #
@@ -69,30 +72,53 @@ module Wrq
 
       alias search call
 
-      # Read either symbol or string keys, falling back to a public reader on
-      # record objects. This intentionally avoids Hash#dig so simple Hash-like
-      # implementations work too.
+      # Read either symbol or string keys from a Hash, Hash-like object, or an
+      # object's #to_h representation. Avoid runtime method dispatch so the
+      # same search implementation remains whole-program AOT compatible.
       def value(record, *keys)
-        data = record_data(record)
+        if record.is_a?(Paper)
+          data = record.to_h
+          metadata = record.metadata
+        elsif record.is_a?(Hash)
+          data = record
+          metadata = data["metadata"]
+          metadata ||= data[:metadata] if defined?(RubyVM)
+        elsif defined?(RubyVM)
+          data = record_data(record)
+          keys.each do |key|
+            found, candidate = value_from(data, key)
+            return candidate if found && !candidate.nil?
+          end
+
+          nested = value_from(data, :metadata)
+          if nested[0] && nested[1]
+            keys.each do |key|
+              found, candidate = value_from(nested[1], key)
+              return candidate if found && !candidate.nil?
+            end
+          end
+          return nil
+        else
+          return nil
+        end
 
         keys.each do |key|
-          found, candidate = value_from(data, key)
-          return candidate if found && !candidate.nil?
-
-          if !record.equal?(data) && record.respond_to?(key)
-            begin
-              candidate = record.public_send(key)
-              return candidate unless candidate.nil?
-            rescue ArgumentError, NoMethodError
-            end
+          candidate = data[key.to_s]
+          return candidate unless candidate.nil?
+          if defined?(RubyVM)
+            candidate = data[key]
+            return candidate unless candidate.nil?
           end
         end
 
-        metadata = value_from(data, :metadata)
-        if metadata[0] && metadata[1]
+        if metadata.is_a?(Hash)
           keys.each do |key|
-            found, candidate = value_from(metadata[1], key)
-            return candidate if found && !candidate.nil?
+            candidate = metadata[key.to_s]
+            return candidate unless candidate.nil?
+            if defined?(RubyVM)
+              candidate = metadata[key]
+              return candidate unless candidate.nil?
+            end
           end
         end
 
@@ -144,32 +170,23 @@ module Wrq
       # Convert arXiv URLs, HF paper URLs, arxiv: references, and versioned IDs
       # to the logical versionless identifier used for exact-ID matching.
       def normalize_reference(reference)
-        text = reference.to_s.strip.downcase
-        text = text.split(/[?#]/, 2)[0].to_s
+        identity = Identity.recognize(reference)
+        return identity.canonical_key if identity
 
-        marker = "arxiv.org/abs/"
-        if text.include?(marker)
-          text = text.split(marker, 2)[1].to_s
-        else
-          marker = "arxiv.org/pdf/"
-          if text.include?(marker)
-            text = text.split(marker, 2)[1].to_s
-          else
-            marker = "huggingface.co/papers/"
-            text = text.split(marker, 2)[1].to_s if text.include?(marker)
-          end
-        end
-
-        text = text.sub(/\Aarxiv\s*:\s*/i, "")
-        text = text.sub(/\.pdf\z/i, "")
-        text = text.sub(/v\d+\z/i, "")
-        text.strip
+        # Identity owns every supported URL and identifier normalization. A
+        # value that reaches this branch is ordinary fuzzy-search text, so it
+        # only needs case and surrounding-space normalization. Keeping this
+        # branch free of regexp-based String#split also avoids an incompatible
+        # overload in the Spinel runtime.
+        reference.to_s.strip.downcase
       end
 
       private
 
       def record_data(record)
-        return record unless record.respond_to?(:to_h)
+        return record.to_h if record.is_a?(Paper)
+        return record if record.is_a?(Hash)
+        return record unless defined?(RubyVM) && record.respond_to?(:to_h)
 
         begin
           converted = record.to_h
@@ -180,24 +197,28 @@ module Wrq
       end
 
       def value_from(data, key)
-        return [false, nil] unless data.respond_to?(:[])
+        if data.is_a?(Hash)
+          return [true, data[key]] if data.key?(key)
 
-        variants = [key]
-        begin
-          variants << key.to_sym
-        rescue NoMethodError
-        end
-        variants << key.to_s
-        variants.uniq.each do |variant|
-          if data.respond_to?(:key?)
-            return [true, data[variant]] if data.key?(variant)
-          else
+          string_key = key.to_s
+          return [true, data[string_key]] if data.key?(string_key)
+
+          if defined?(RubyVM)
             begin
-              candidate = data[variant]
-              return [true, candidate] unless candidate.nil?
-            rescue ArgumentError, IndexError, TypeError
+              symbol_key = key.to_sym
+              return [true, data[symbol_key]] if data.key?(symbol_key)
+            rescue NoMethodError
             end
           end
+          return [false, nil]
+        end
+
+        return [false, nil] unless defined?(RubyVM) && data.respond_to?(:[])
+
+        begin
+          candidate = data[key]
+          return [true, candidate] unless candidate.nil?
+        rescue ArgumentError, IndexError, TypeError
         end
 
         [false, nil]
@@ -277,9 +298,47 @@ module Wrq
         end
       end
 
+      title_positions = title_match ? title_match[1] : []
+      if best_score.nil?
+        tokens = query.split(" ").reject(&:empty?).uniq
+        if tokens.length > 1
+          token_scores = []
+          token_fields = []
+          token_title_positions = []
+          tokens.each do |token|
+            token_best_score = nil
+            token_best_field = nil
+            token_best_positions = []
+            fields.each do |field, text|
+              match = fuzzy_match(text, token)
+              next unless match
+
+              score = FIELD_SCORES[field] + match[0]
+              if token_best_score.nil? || score > token_best_score
+                token_best_score = score
+                token_best_field = field
+                token_best_positions = match[1]
+              end
+            end
+            return nil unless token_best_score
+
+            token_scores << token_best_score
+            token_fields << token_best_field
+            if token_best_field == :title
+              token_title_positions.concat(token_best_positions)
+            end
+          end
+          best_score = token_scores.inject(0.0) { |sum, score| sum + score } /
+            token_scores.length
+          unique_fields = token_fields.uniq
+          best_field = unique_fields.length == 1 ? unique_fields.first : :multiple
+          title_positions = token_title_positions.uniq.sort
+        end
+      end
+
       return nil unless best_score
 
-      Result.new(record, best_score + recency, title_match ? title_match[1] : [], best_field)
+      Result.new(record, best_score + recency, title_positions, best_field)
     end
 
     # Returns [quality, positions]. Quality stays below a field's 1,000-point
@@ -344,7 +403,23 @@ module Wrq
     end
 
     def normalize_space(text)
-      text.strip.gsub(/[[:space:]]+/, " ")
+      normalized = String.new
+      pending_space = false
+      text.each_char do |character|
+        if whitespace_character?(character)
+          pending_space = !normalized.empty?
+        else
+          normalized << " " if pending_space
+          normalized << character
+          pending_space = false
+        end
+      end
+      normalized
+    end
+
+    def whitespace_character?(character)
+      character == " " || character == "\t" || character == "\n" ||
+        character == "\r" || character == "\f" || character == "\v"
     end
 
     def word_character?(character)
@@ -381,7 +456,6 @@ module Wrq
     def coerce_time(value)
       return value if value.is_a?(Time)
       return Time.at(value) if value.is_a?(Numeric)
-      return value.to_time if value.respond_to?(:to_time)
 
       text = value.to_s
       return nil if text.empty?

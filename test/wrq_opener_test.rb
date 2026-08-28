@@ -27,4 +27,9 @@ class WrqOpenerTest < Minitest::Test
     opener = Wrq::Opener.new(env: { 'WRQ_OPENER' => '/usr/bin/false; echo unsafe' })
     assert_equal ['/usr/bin/false; echo unsafe'], opener.send(:command_for_platform)
   end
+
+  def test_windows_default_does_not_route_paths_through_cmd
+    opener = Wrq::Opener.new(env: {}, platform: "x64-mingw-ucrt")
+    assert_equal ["explorer.exe"], opener.send(:command_for_platform)
+  end
 end

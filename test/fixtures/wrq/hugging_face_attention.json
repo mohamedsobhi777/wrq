@@ -3,6 +3,7 @@
   "title": "Attention Is All You Need",
   "summary": "The Transformer uses attention without recurrence.",
   "ai_summary": "Introduces the Transformer architecture.",
+  "aiKeywords": ["transformers", "attention"],
   "authors": [
     {"name": "Ashish Vaswani", "user": "avaswani"},
     {"name": "Noam Shazeer"},

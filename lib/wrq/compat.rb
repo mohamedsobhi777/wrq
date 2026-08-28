@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require "digest"
+require_relative "sha256"
 
 module Wrq
   class Error < StandardError; end
@@ -67,7 +67,7 @@ module Wrq
         io.write(contents.to_s)
         io.flush
         begin
-          io.fsync if io.respond_to?(:fsync)
+          io.fsync
         rescue NotImplementedError, SystemCallError
         end
         io.close
@@ -85,7 +85,7 @@ module Wrq
     end
 
     def self.copy_with_sha256(source_path, destination_path, chunk_size = COPY_CHUNK_SIZE)
-      digest = Digest::SHA256.new
+      digest = SHA256.new
       size = 0
       header = String.new
 
@@ -94,7 +94,7 @@ module Wrq
           File.open(destination_path.to_s, "wbx", 0o600) do |destination|
             loop do
               chunk = source.read(chunk_size)
-              break if chunk.nil? || chunk.empty?
+              break if chunk.nil? || chunk.bytesize == 0
 
               header << chunk.byteslice(0, 5 - header.bytesize) if header.bytesize < 5
               digest.update(chunk)
@@ -103,7 +103,7 @@ module Wrq
             end
             destination.flush
             begin
-              destination.fsync if destination.respond_to?(:fsync)
+              destination.fsync
             rescue NotImplementedError, SystemCallError
             end
           end
@@ -120,41 +120,49 @@ module Wrq
     end
 
     def self.sha256_file(path, chunk_size = COPY_CHUNK_SIZE)
-      digest = Digest::SHA256.new
-      File.open(path.to_s, "rb") do |io|
-        loop do
-          chunk = io.read(chunk_size)
-          break if chunk.nil? || chunk.empty?
-          digest.update(chunk)
-        end
-      end
-      digest.hexdigest
+      SHA256.file(path, chunk_size)
     end
 
-    # File#flock is available on MRI's supported Unix platforms. Spinel or a
-    # filesystem without flock still gets correct single-process behavior.
-    def self.with_file_lock(path, exclusive = true)
-      mkdir_p(File.dirname(File.expand_path(path.to_s)))
-      lock = File.open(path.to_s, "a")
-      locked = false
+    def self.acquire_file_lock(path, exclusive = true)
+      lock_path = File.expand_path(path.to_s)
+      mkdir_p(File.dirname(lock_path))
+      raise UnsafePath, "lock file cannot be a symlink: #{lock_path}" if File.symlink?(lock_path)
+
+      lock = File.open(lock_path, "a", 0o600)
       begin
-        begin
-          if lock.respond_to?(:flock)
-            result = lock.flock(exclusive ? 2 : 1)
-            locked = result != false
-          end
-        rescue NotImplementedError, SystemCallError
-          locked = false
+        path_stat = File.lstat(lock_path)
+        file_stat = lock.stat
+        if path_stat.symlink? || path_stat.nlink != 1 || file_stat.nlink != 1 ||
+           path_stat.dev != file_stat.dev || path_stat.ino != file_stat.ino
+          raise UnsafePath, "lock file changed while opening: #{lock_path}"
         end
+        result = lock.flock(exclusive ? 2 : 1)
+        raise Error, "could not acquire library lock: #{lock_path}" if result == false
+        lock
+      rescue StandardError, Interrupt
+        lock.close unless lock.closed?
+        raise
+      end
+    end
+
+    def self.release_file_lock(lock)
+      return unless lock
+
+      begin
+        lock.flock(8)
+      rescue SystemCallError
+      ensure
+        lock.close unless lock.closed?
+      end
+      nil
+    end
+
+    def self.with_file_lock(path, exclusive = true)
+      lock = acquire_file_lock(path, exclusive)
+      begin
         yield
       ensure
-        if locked
-          begin
-            lock.flock(8)
-          rescue NotImplementedError, SystemCallError
-          end
-        end
-        lock.close unless lock.closed?
+        release_file_lock(lock)
       end
     end
   end

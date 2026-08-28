@@ -275,7 +275,12 @@ module Wrq
     end
 
     def interactive?
-      @input.respond_to?(:tty?) && @input.tty? && @io.respond_to?(:tty?) && @io.tty?
+      if defined?(RubyVM)
+        @input.respond_to?(:tty?) && @input.tty? &&
+          @io.respond_to?(:tty?) && @io.tty?
+      else
+        @input.is_a?(IO) && @input.tty? && @io.is_a?(IO) && @io.tty?
+      end
     end
 
     def setup_terminal
@@ -330,21 +335,10 @@ module Wrq
     end
 
     def with_raw_tty
-      state = stty_state
-      system("stty", "raw", "-echo") if state
+      raw = interactive? && system("stty", "raw", "-echo")
       yield
     ensure
-      system("stty", state) if state && !state.empty?
-    end
-
-    def stty_state
-      return nil unless interactive?
-
-      output = IO.popen(["stty", "-g"], "r") { |process| process.read }
-      state = output.to_s.strip
-      state.empty? ? nil : state
-    rescue IOError, SystemCallError
-      nil
+      system("stty", "sane") if raw
     end
 
     def read_key

@@ -1,0 +1,5 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+$0 = File.expand_path("../wrq.rb", __dir__)
+load $0

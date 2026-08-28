@@ -1,8 +1,8 @@
 class Wrq < Formula
   desc "Local-first command-line library for research papers"
   homepage "https://github.com/mohamedsobhi777/wrq"
-  url "https://github.com/mohamedsobhi777/wrq/archive/refs/tags/v0.1.1.tar.gz"
-  sha256 "505cda44aa68d8277b87a7fdce40631b083c5f91610fd2fa63ff563129308a82"
+  url "https://github.com/mohamedsobhi777/wrq/archive/refs/tags/v0.1.2.tar.gz"
+  sha256 "d37c06add0f92d4e5dd8e8334ebbc9104d6c2a12a368b737d959146046a29455"
   license "MIT"
   head "https://github.com/mohamedsobhi777/wrq.git", branch: "main"
 

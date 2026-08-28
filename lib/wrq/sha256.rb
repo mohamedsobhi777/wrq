@@ -43,8 +43,11 @@ module Wrq
       digest = new
       File.open(path.to_s, "rb") do |file|
         loop do
-          chunk = file.read(chunk_size)
-          break if chunk.nil? || chunk.bytesize == 0
+          begin
+            chunk = file.readpartial(chunk_size)
+          rescue EOFError
+            break
+          end
           digest.update(chunk)
         end
       end

@@ -878,8 +878,11 @@ module Wrq
         File.open(relocation[:destination], "rb") do |source|
           File.open(relocation[:source], "wbx", 0o600) do |destination|
             loop do
-              chunk = source.read(Compat::COPY_CHUNK_SIZE)
-              break if chunk.nil? || chunk.bytesize == 0
+              begin
+                chunk = source.readpartial(Compat::COPY_CHUNK_SIZE)
+              rescue EOFError
+                break
+              end
               destination.write(chunk)
             end
           end

@@ -137,6 +137,10 @@ compare_normalize() {
     text.gsub!(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})/, "<TIMESTAMP>")
     text.gsub!(%r{(\.wrq/trash/)\d{14}}, "\\1<TIMESTAMP>")
     text.gsub!(/("score"\s*:\s*)[-+0-9.eE]+/, "\\1<SCORE>")
+    # json 2.7 and 2.10 format empty containers differently in pretty mode.
+    # Normalize that presentation detail before comparing CLI behavior.
+    text.gsub!(/\[\s*\]/, "[]")
+    text.gsub!(/\{\s*\}/, "{}")
     File.binwrite(destination, text)
   ' "$source" "$destination" "$library_root" "$COMPARE_ROOT"
 }

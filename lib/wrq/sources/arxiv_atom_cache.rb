@@ -61,7 +61,11 @@ module Wrq
           stat = file.stat
           return nil if stat.size > maximum_file_bytes
 
-          contents = file.read(maximum_file_bytes + 1)
+          begin
+            contents = file.readpartial(maximum_file_bytes + 1)
+          rescue EOFError
+            contents = String.new
+          end
           modified_at = stat.mtime.to_f
         end
         return nil if contents.nil? || contents.bytesize > maximum_file_bytes

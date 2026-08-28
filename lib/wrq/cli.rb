@@ -994,7 +994,13 @@ module Wrq
               if actual_size != asset.size
                 errors << "size mismatch for #{paper.key}: #{asset_path} (#{actual_size} != #{asset.size})"
               end
-              header = File.open(asset_path, "rb") { |file| file.read(5).to_s }
+              header = File.open(asset_path, "rb") do |file|
+                begin
+                  file.readpartial(5).to_s
+                rescue EOFError
+                  String.new
+                end
+              end
               unless header == "%PDF-"
                 errors << "invalid PDF signature for #{paper.key}: #{asset_path}"
               end

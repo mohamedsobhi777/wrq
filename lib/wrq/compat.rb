@@ -93,8 +93,11 @@ module Wrq
         File.open(source_path.to_s, "rb") do |source|
           File.open(destination_path.to_s, "wbx", 0o600) do |destination|
             loop do
-              chunk = source.read(chunk_size)
-              break if chunk.nil? || chunk.bytesize == 0
+              begin
+                chunk = source.readpartial(chunk_size)
+              rescue EOFError
+                break
+              end
 
               header << chunk.byteslice(0, 5 - header.bytesize) if header.bytesize < 5
               digest.update(chunk)

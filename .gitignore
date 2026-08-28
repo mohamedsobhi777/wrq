@@ -2,3 +2,6 @@
 *.gem
 .claude/settings.local.json
 dist/
+pkg/
+result
+result-*

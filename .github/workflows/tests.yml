@@ -2,21 +2,95 @@ name: Tests
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main]
+    tags: ["v*"]
   pull_request:
-    branches: [ "**" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  ruby-tests:
+  ruby:
+    name: Ruby ${{ matrix.ruby }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ["3.2", "3.3", "4.0"]
+
     steps:
-      - name: Checkout
+      - name: Check out wrq
         uses: actions/checkout@v6
 
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.3'
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
 
-      - name: Run tests
-        run: rake
+      - name: Run MRI test suite
+        run: bundle exec rake
+
+      - name: Build gem
+        if: matrix.ruby == '3.3'
+        run: gem build wrq.gemspec
+
+      - name: Smoke-test installed gem
+        if: matrix.ruby == '3.3'
+        run: |
+          gem install --local wrq-cli-*.gem
+          wrq --version
+          wrq --help
+
+  spinel:
+    name: Spinel native
+    runs-on: ubuntu-latest
+    env:
+      SPINEL_REV: 3166410a340960a6a10a8270cccc8d544fedd689
+
+    steps:
+      - name: Check out wrq
+        uses: actions/checkout@v6
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+
+      - name: Check out pinned Spinel
+        uses: actions/checkout@v6
+        with:
+          repository: matz/spinel
+          ref: ${{ env.SPINEL_REV }}
+          path: .spinel
+
+      - name: Build Spinel
+        run: |
+          make -C .spinel deps
+          make -C .spinel -j2
+
+      - name: Build and verify wrq native
+        env:
+          SPINEL: ${{ github.workspace }}/.spinel/spinel
+        run: |
+          make native
+          make native-test
+          make native-compare
+
+  nix:
+    name: Nix package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out wrq
+        uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Check flake
+        run: nix flake check --print-build-logs
+
+      - name: Run packaged CLI
+        run: nix run . -- --version

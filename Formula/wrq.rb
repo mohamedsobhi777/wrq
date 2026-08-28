@@ -1,0 +1,22 @@
+class Wrq < Formula
+  desc "Local-first command-line library for research papers"
+  homepage "https://github.com/mohamedsobhi777/wrq"
+  license "MIT"
+  head "https://github.com/mohamedsobhi777/wrq.git", branch: "main"
+
+  depends_on "ruby"
+  on_linux do
+    depends_on "xdg-utils"
+  end
+
+  def install
+    libexec.install "wrq.rb", "lib"
+    (bin/"wrq").write_env_script libexec/"wrq.rb",
+      PATH: "#{formula_opt_bin("ruby")}:$PATH"
+  end
+
+  test do
+    assert_match "wrq 0.1.0", shell_output("#{bin}/wrq --version")
+    assert_match "research paper", shell_output("#{bin}/wrq --help")
+  end
+end

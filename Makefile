@@ -1,147 +1,83 @@
-# Makefile for try - Fresh directories for every vibe
+# Build and development helpers for wrq.
 
-SHELL := /bin/bash
-RUBY := ruby
-SCRIPT := try.rb
-TEST_DIR := tests
+SHELL := /bin/sh
 
-# Default target
-.PHONY: help
-help: ## Show this help message
-	@echo "try - Fresh directories for every vibe"
-	@echo ""
-	@echo "Available targets:"
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
+RUBY ?= ruby
+RAKE ?= $(RUBY) -S rake
+PREFIX ?= $(HOME)/.local
 
-.PHONY: test
-test: ## Run all tests
-	@echo "Running tests..."
-	cd $(TEST_DIR) && $(RUBY) -I.. -e "require 'rake'; load 'Rakefile'; Rake::Task['test'].invoke"
+SCRIPT := wrq.rb
+LIB_SOURCES := $(shell find lib -type f -name '*.rb' -print 2>/dev/null)
+RUBY_SOURCES := $(SCRIPT) $(LIB_SOURCES)
 
-.PHONY: test-pr
-test-pr: ## Run only PR command tests
-	@echo "Running PR command tests..."
-	$(RUBY) $(TEST_DIR)/test_pr_command.rb
-
-.PHONY: lint
-lint: ## Check Ruby syntax
-	@echo "Checking Ruby syntax..."
-	$(RUBY) -c $(SCRIPT)
-	@for file in $(TEST_DIR)/test_*.rb; do \
-		echo "Checking $$file..."; \
-		$(RUBY) -c "$$file"; \
-	done
-
-.PHONY: install
-install: ## Install try.rb to ~/.local/
-	@echo "Installing $(SCRIPT) to ~/.local/..."
-	@mkdir -p ~/.local
-	@cp $(SCRIPT) ~/.local/
-	@chmod +x ~/.local/$(SCRIPT)
-	@echo "Installed! Add to your shell:"
-	@echo "  eval \"\$$(~/.local/$(SCRIPT) init ~/src/tries)\""
-
-.PHONY: install-global
-install-global: ## Install try.rb to /usr/local/bin/
-	@echo "Installing $(SCRIPT) to /usr/local/bin/..."
-	@sudo cp $(SCRIPT) /usr/local/bin/try
-	@sudo chmod +x /usr/local/bin/try
-	@echo "Installed globally! Add to your shell:"
-	@echo "  eval \"\$$(try init ~/src/tries)\""
-
-.PHONY: demo
-demo: ## Show example commands
-	@echo "try - Example commands:"
-	@echo ""
-	@echo "Basic usage:"
-	@echo "  ./$(SCRIPT) --help                                # Show help"
-	@echo "  ./$(SCRIPT) init ~/src/tries                     # Generate shell integration"
-	@echo ""
-	@echo "Clone repositories:"
-	@echo "  ./$(SCRIPT) clone https://github.com/user/repo.git"
-	@echo "  ./$(SCRIPT) clone git@github.com:user/repo.git my-fork"
-	@echo ""
-	@echo "Work with PRs:"
-	@echo "  ./$(SCRIPT) pr 123                               # PR from current repo"
-	@echo "  ./$(SCRIPT) pr user/repo#456                     # PR from specific repo"
-	@echo "  ./$(SCRIPT) pr https://github.com/user/repo/pull/789"
-	@echo ""
-	@echo "Worktrees:"
-	@echo "  ./$(SCRIPT) worktree dir                         # From current repo"
-	@echo "  ./$(SCRIPT) worktree ~/path/to/repo my-branch    # From specific repo"
-
-.PHONY: version
-version: ## Show version information  
-	@echo "try.rb - Fresh directories for every vibe"
-	@echo "Ruby version: $$($(RUBY) --version)"
-	@echo "Script: $(SCRIPT)"
-
-.PHONY: clean
-clean: ## Clean up temporary files
-	@echo "Cleaning up..."
-	@find . -name "*.tmp" -delete
-	@find . -name "*~" -delete
-	@echo "Clean complete"
-
-.PHONY: check-deps
-check-deps: ## Check for required dependencies
-	@echo "Checking dependencies..."
-	@command -v $(RUBY) >/dev/null 2>&1 || { echo "Ruby is required but not installed"; exit 1; }
-	@echo "✓ Ruby found: $$($(RUBY) --version)"
-	@command -v git >/dev/null 2>&1 || { echo "Git is required but not installed"; exit 1; }
-	@echo "✓ Git found: $$(git --version)"
-	@command -v gh >/dev/null 2>&1 && echo "✓ GitHub CLI found: $$(gh --version | head -1)" || echo "! GitHub CLI not found (optional for PR features)"
-	@echo "Dependencies check complete"
-
-.PHONY: dev-setup
-dev-setup: check-deps ## Set up development environment
-	@echo "Setting up development environment..."
-	@echo "All dependencies satisfied"
-	@echo ""
-	@echo "To test locally:"
-	@echo "  make test"
-	@echo ""
-	@echo "To install locally:"
-	@echo "  make install"
-
-.PHONY: all
-all: lint test ## Run all checks and tests
-
-# Development shortcuts
-.PHONY: t
-t: test ## Shortcut for test
-
-.PHONY: l  
-l: lint ## Shortcut for lint
-
-.PHONY: i
-i: install ## Shortcut for install
-
-# Native binary via Spinel (optional)
 SPINEL ?= spinel
 SPINEL_FLAGS ?= -O s
-CC ?= cc
-NATIVE = dist/try
-NATIVE_C = dist/try.c
-SPINEL_BIN := $(shell command -v $(SPINEL) 2>/dev/null)
-SPINEL_LIB ?= $(dir $(SPINEL_BIN))../lib
+NATIVE := dist/wrq
+NATIVE_C := dist/wrq.c
 
-.PHONY: native native-test native-compare
-native: $(NATIVE)
+.DEFAULT_GOAL := help
 
-$(NATIVE_C): try.rb lib/tui.rb lib/fuzzy.rb
+.PHONY: help
+help: ## Show available targets
+	@echo "wrq - a local-first research paper library"
+	@echo
+	@echo "Available targets:"
+	@awk 'BEGIN { FS = ":.*## " } /^[a-zA-Z0-9_.-]+:.*## / { printf "  %-16s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+
+.PHONY: test
+test: ## Run lint, unit tests, shell specs, and optional native checks
+	$(RAKE) test
+
+.PHONY: lint
+lint: ## Syntax-check all Ruby sources
+	$(RAKE) lint
+
+.PHONY: unit
+unit: ## Run Minitest
+	$(RAKE) unit
+
+.PHONY: spec
+spec: ## Run MRI shell acceptance specs
+	$(RAKE) spec
+
+.PHONY: gem
+gem: ## Build the wrq-cli gem
+	gem build wrq.gemspec
+
+.PHONY: install
+install: ## Install beneath PREFIX (default: ~/.local)
+	install -d "$(PREFIX)/bin" "$(PREFIX)/libexec/wrq"
+	install -m 755 "$(SCRIPT)" "$(PREFIX)/libexec/wrq/wrq.rb"
+	rm -rf "$(PREFIX)/libexec/wrq/lib"
+	cp -R lib "$(PREFIX)/libexec/wrq/lib"
+	ln -sfn "../libexec/wrq/wrq.rb" "$(PREFIX)/bin/wrq"
+	@echo "Installed $(PREFIX)/bin/wrq"
+
+.PHONY: uninstall
+uninstall: ## Remove files installed by this Makefile
+	rm -f "$(PREFIX)/bin/wrq"
+	rm -rf "$(PREFIX)/libexec/wrq"
+
+.PHONY: native
+native: $(NATIVE_C) $(NATIVE) ## Emit C and build the Spinel native executable
+
+$(NATIVE_C): $(RUBY_SOURCES)
 	mkdir -p dist
-	$(SPINEL) $(SPINEL_FLAGS) -c try.rb -o $(NATIVE_C)
+	$(SPINEL) $(SPINEL_FLAGS) -c "$(SCRIPT)" -o "$@"
 
-$(NATIVE): $(NATIVE_C)
-	$(CC) -Os -Wno-all -ffunction-sections -fdata-sections \
-		-I$(SPINEL_LIB) -I$(SPINEL_LIB)/regexp \
-		$(NATIVE_C) $(SPINEL_LIB)/libspinel_rt.a \
-		-lm -lcrypt -Wl,--gc-sections -o $(NATIVE)
-	strip $(NATIVE)
+$(NATIVE): $(RUBY_SOURCES)
+	mkdir -p dist
+	$(SPINEL) $(SPINEL_FLAGS) "$(SCRIPT)" -o "$@"
 
-native-test: $(NATIVE)
-	bash spec/tests/runner.sh $(NATIVE)
+.PHONY: native-test
+native-test: native ## Run shell specs against the native executable
+	bash spec/tests/wrq_runner.sh "$(NATIVE)"
 
-native-compare: $(NATIVE)
-	bash spec/tests/runner_and_compare.sh ./try.rb $(NATIVE)
+.PHONY: native-compare
+native-compare: native ## Compare normalized MRI and native behavior
+	bash spec/tests/wrq_runner_and_compare.sh "./$(SCRIPT)" "$(NATIVE)"
+
+.PHONY: clean
+clean: ## Remove generated local artifacts
+	rm -rf dist pkg
+	rm -f wrq-cli-*.gem

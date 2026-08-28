@@ -1,5 +1,5 @@
 {
-  description = "try - fresh directories for every vibe";
+  description = "wrq - a local-first research paper library";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -8,92 +8,101 @@
 
   outputs = inputs@{ flake-parts, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
-      systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "x86_64-darwin"
+        "aarch64-darwin"
+      ];
 
       flake = {
         homeModules.default = { config, lib, pkgs, ... }:
-          with lib;
           let
-            cfg = config.programs.try;
+            cfg = config.programs.wrq;
           in
           {
-            options.programs.try = {
-              enable = mkEnableOption "try - fresh directories for every vibe";
+            options.programs.wrq = {
+              enable = lib.mkEnableOption "wrq research paper library";
 
-              package = mkOption {
-                type = types.package;
+              package = lib.mkOption {
+                type = lib.types.package;
                 default = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.default;
-                defaultText = literalExpression "inputs.self.packages.\${pkgs.stdenv.hostPlatform.system}.default";
-                description = ''
-                  The try package to use. Can be overridden to customize Ruby version:
-                  
-                  ```nix
-                  programs.try.package = inputs.try.packages.${"$"}{pkgs.stdenv.hostPlatform.system}.default.override {
-                    ruby = pkgs.ruby_3_3;
-                  };
-                  ```
-                '';
+                defaultText = lib.literalExpression
+                  "inputs.wrq.packages.${pkgs.stdenv.hostPlatform.system}.default";
+                description = "The wrq package to install.";
               };
 
-              path = mkOption {
-                type = types.str;
-                default = "~/src/tries";
-                description = "Path where try directories will be stored.";
+              path = lib.mkOption {
+                type = lib.types.str;
+                default = "~/papers";
+                description = "Root of the local wrq paper library.";
               };
             };
 
-            config = mkIf cfg.enable {
-              programs.bash.initExtra = mkIf config.programs.bash.enable ''
-                eval "$(${cfg.package}/bin/try init ${cfg.path})"
-              '';
-
-              programs.zsh.initContent = mkIf config.programs.zsh.enable ''
-                eval "$(${cfg.package}/bin/try init ${cfg.path})"
-              '';
-
-              programs.fish.shellInit = mkIf config.programs.fish.enable ''
-                eval (${cfg.package}/bin/try init ${cfg.path} | string collect)
-              '';
+            config = lib.mkIf cfg.enable {
+              home.packages = [ cfg.package ];
+              home.sessionVariables.WRQ_PATH = cfg.path;
             };
           };
 
-        # Backwards compatibility - deprecated
-        homeManagerModules.default = builtins.trace 
-          "WARNING: homeManagerModules is deprecated and will be removed in a future version. Please use homeModules instead."
-          inputs.self.homeModules.default;
+        # Compatibility for Home Manager configurations using the older output
+        # name. New configurations should use homeModules.default.
+        homeManagerModules.default = inputs.self.homeModules.default;
       };
 
-      perSystem = { config, self', inputs', pkgs, system, ... }: {
-        packages.default = pkgs.callPackage ({ ruby ? pkgs.ruby_3_3 }: pkgs.stdenv.mkDerivation rec {
-          pname = "try";
-          version = builtins.replaceStrings ["\n"] [""] (builtins.readFile ./VERSION);
+      perSystem = { self', pkgs, ... }:
+        let
+          runtimeDeps = pkgs.lib.optionals pkgs.stdenv.isLinux [
+            pkgs.xdg-utils
+          ];
 
-          src = inputs.self;
-          nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+          package = pkgs.stdenvNoCC.mkDerivation {
+            pname = "wrq";
+            version = builtins.replaceStrings [ "\n" ] [ "" ]
+              (builtins.readFile ./VERSION);
+            src = inputs.self;
 
-          installPhase = ''
-            mkdir -p $out/bin
-            cp try.rb $out/bin/try
-            cp -r lib $out/bin/
-            chmod +x $out/bin/try
+            nativeBuildInputs = [ pkgs.makeWrapper ];
 
-            wrapProgram $out/bin/try \
-              --prefix PATH : ${ruby}/bin
-          '';
+            installPhase = ''
+              runHook preInstall
 
-          meta = with pkgs.lib; {
-            description = "Fresh directories for every vibe - lightweight experiments for people with ADHD";
-            homepage = "https://github.com/tobi/try";
-            license = licenses.mit;
-            maintainers = [ ];
-            platforms = platforms.unix;
+              install -Dm755 wrq.rb "$out/libexec/wrq/wrq.rb"
+              cp -R lib "$out/libexec/wrq/lib"
+              makeWrapper ${pkgs.ruby_3_3}/bin/ruby "$out/bin/wrq" \
+                --add-flags "$out/libexec/wrq/wrq.rb" \
+                ${pkgs.lib.optionalString pkgs.stdenv.isLinux
+                  "--prefix PATH : ${pkgs.lib.makeBinPath runtimeDeps}"}
+
+              runHook postInstall
+            '';
+
+            doInstallCheck = true;
+            installCheckPhase = ''
+              "$out/bin/wrq" --version
+            '';
+
+            meta = {
+              description = "Local-first command-line library for research papers";
+              homepage = "https://github.com/mohamedsobhi777/wrq";
+              license = pkgs.lib.licenses.mit;
+              mainProgram = "wrq";
+              platforms = pkgs.lib.platforms.unix;
+            };
           };
-        }) {};
+        in
+        {
+          packages = {
+            default = package;
+            wrq = package;
+          };
 
-        apps.default = {
-          type = "app";
-          program = "${self'.packages.default}/bin/try";
+          apps.default = {
+            type = "app";
+            program = "${self'.packages.default}/bin/wrq";
+          };
+
+          checks.package = self'.packages.default;
         };
-      };
     };
 }

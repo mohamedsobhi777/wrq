@@ -1,58 +1,74 @@
-require 'rake/testtask'
-require 'tempfile'
+# frozen_string_literal: true
 
-RUBY_SOURCES = FileList['try.rb', 'lib/**/*.rb']
+require "rake/testtask"
+require "rbconfig"
+require "tmpdir"
+
+RUBY_SOURCES = FileList["wrq.rb", "lib/**/*.rb"].to_a.freeze
+WRQ_SPEC_RUNNER = "spec/tests/wrq_runner.sh"
+WRQ_COMPARE_RUNNER = "spec/tests/wrq_runner_and_compare.sh"
 
 def spinel_cmd
-  ENV.fetch('SPINEL', 'spinel')
+  ENV.fetch("SPINEL", "spinel")
 end
 
 def spinel_available?
-  system('sh', '-c', 'command -v "$1" >/dev/null', '--', spinel_cmd)
+  system("sh", "-c", 'command -v "$1" >/dev/null 2>&1', "--", spinel_cmd)
 end
 
-Rake::TestTask.new(:unit) do |t|
-  t.libs << 'lib' << 'test'
-  t.pattern = 'test/**/*_test.rb'
+Rake::TestTask.new(:unit) do |task|
+  task.libs << "lib" << "test" << "."
+  task.pattern = "test/**/*_test.rb"
 end
 
-desc "Check syntax with MRI and Spinel (warns if Spinel is missing)"
+desc "Check every Ruby file with MRI and the complete program with Spinel"
 task :lint do
   RUBY_SOURCES.each do |file|
-    sh 'ruby', '-c', file
+    sh RbConfig.ruby, "-c", file
   end
 
   unless spinel_available?
-    warn "warning: spinel not found (#{spinel_cmd}); skipping Spinel syntax check"
-    warn "warning: try must parse and run on both MRI Ruby and Spinel"
+    warn "warning: Spinel not found (#{spinel_cmd}); skipping AOT syntax checks"
     next
   end
 
-  RUBY_SOURCES.each do |file|
-    Tempfile.create(['try-spinel-syntax', '.c']) do |tmp|
-      sh spinel_cmd, '-c', file, '-o', tmp.path
-    end
+  Dir.mktmpdir("wrq-spinel-lint") do |directory|
+    output = File.join(directory, "wrq.c")
+    sh spinel_cmd, "-c", "wrq.rb", "-o", output
   end
 end
 
-desc "Run shell spec compliance tests (MRI)"
+desc "Run wrq shell acceptance specs against MRI"
 task :spec do
-  sh 'bash', 'spec/tests/runner.sh', './try.rb'
+  unless File.file?(WRQ_SPEC_RUNNER)
+    raise "missing wrq shell spec runner: #{WRQ_SPEC_RUNNER}"
+  end
+
+  sh "bash", WRQ_SPEC_RUNNER, "./wrq.rb"
 end
 
-desc "Emit dist/try.c, compile dist/try, spec it, and compare with MRI"
+desc "Build, spec, and compare the Spinel executable"
 task :spec_spinel do
   unless spinel_available?
-    warn "warning: spinel not found (#{spinel_cmd}); skipping native spec + compare"
+    warn "warning: Spinel not found (#{spinel_cmd}); skipping native specs"
     next
   end
 
-  sh 'make', 'native', "SPINEL=#{spinel_cmd}"
-  sh 'bash', 'spec/tests/runner.sh', 'dist/try'
-  sh 'bash', 'spec/tests/runner_and_compare.sh', './try.rb', 'dist/try'
+  unless File.file?(WRQ_COMPARE_RUNNER)
+    raise "missing wrq comparison runner: #{WRQ_COMPARE_RUNNER}"
+  end
+
+  sh "make", "native", "SPINEL=#{spinel_cmd}"
+  sh "bash", WRQ_SPEC_RUNNER, "dist/wrq"
+  sh "bash", WRQ_COMPARE_RUNNER, "./wrq.rb", "dist/wrq"
 end
 
-desc "Run all tests (lint + unit + spec; native spec+compare if Spinel is present)"
+desc "Build the wrq-cli gem"
+task :gem do
+  sh "gem", "build", "wrq.gemspec"
+end
+
+desc "Run all checks (native checks are automatic when Spinel is available)"
 task test: [:lint, :unit, :spec, :spec_spinel]
 
 task default: :test

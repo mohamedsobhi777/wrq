@@ -1,35 +1,139 @@
-name: Release
+name: Build release
 
+# Deliberately manual. Dispatch this workflow from a vX.Y.Z tag. The gem is
+# uploaded as an artifact by default and reaches RubyGems only when the boolean
+# input is enabled and the protected rubygems environment approves the job.
 on:
-  push:
-    tags:
-      - 'v*'
-      - '[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      publish_rubygems:
+        description: Publish through the configured RubyGems trusted publisher
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      - name: Check out selected ref
         uses: actions/checkout@v6
 
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.3'
+          ruby-version: "3.3"
+          bundler-cache: true
 
-      - name: Run tests
-        run: rake
+      - name: Test
+        run: bundle exec rake
 
       - name: Build gem
-        run: gem build try-cli.gemspec
+        run: gem build wrq.gemspec
 
-      - name: Configure trusted publishing credentials
-        uses: rubygems/configure-rubygems-credentials@main
+      - name: Smoke-test installed gem
+        run: |
+          gem install --local wrq-cli-*.gem
+          wrq --version
+          wrq --help
 
-      - name: Push to RubyGems
-        run: gem push try-cli-*.gem
+      - name: Upload gem artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wrq-cli-gem
+          path: wrq-cli-*.gem
+          if-no-files-found: error
+
+  spinel:
+    runs-on: ubuntu-latest
+    env:
+      SPINEL_REV: 3166410a340960a6a10a8270cccc8d544fedd689
+
+    steps:
+      - name: Check out selected ref
+        uses: actions/checkout@v6
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+
+      - name: Check out pinned Spinel
+        uses: actions/checkout@v6
+        with:
+          repository: matz/spinel
+          ref: ${{ env.SPINEL_REV }}
+          path: .spinel
+
+      - name: Build Spinel
+        run: |
+          make -C .spinel deps
+          make -C .spinel -j2
+
+      - name: Build and verify native wrq
+        env:
+          SPINEL: ${{ github.workspace }}/.spinel/spinel
+        run: |
+          make native
+          make native-test
+          make native-compare
+
+  nix:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out selected ref
+        uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Verify Nix package
+        run: |
+          nix flake check --print-build-logs
+          nix run . -- --version
+
+  publish:
+    if: inputs.publish_rubygems
+    needs: [build, spinel, nix]
+    runs-on: ubuntu-latest
+    environment: rubygems
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out selected ref
+        uses: actions/checkout@v6
+
+      - name: Require matching release tag
+        shell: bash
+        run: |
+          expected="v$(tr -d '\n' < VERSION)"
+          if [[ "${{ github.ref_type }}" == "tag" && "${{ github.ref_name }}" == "$expected" ]]; then
+            exit 0
+          else
+            echo "RubyGems publishing requires dispatching from tag $expected" >&2
+            exit 1
+          fi
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: false
+
+      - name: Download built gem
+        uses: actions/download-artifact@v4
+        with:
+          name: wrq-cli-gem
+
+      - name: Configure trusted publishing
+        uses: rubygems/configure-rubygems-credentials@dc5a8d8553e6ee01fc26761a49e99e733d17954a # v2.1.0
+
+      - name: Publish wrq-cli
+        run: gem push wrq-cli-*.gem

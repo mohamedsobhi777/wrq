@@ -20,7 +20,7 @@ Once a paper is in the library, opening it does not require a network request.
 `wrq` keeps human-visible PDFs and schema-versioned JSON records on disk, with
 no account, database server, or shell integration.
 
-> **Project status:** `wrq` 0.1.1 is available from source, Nix, and Homebrew.
+> **Project status:** `wrq` 0.1.2 is available from source, Nix, and Homebrew.
 > RubyGems publishing will follow once trusted publishing is configured.
 
 ## Why wrq

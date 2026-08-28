@@ -269,6 +269,13 @@ module Wrq
       update(reference) { |paper| paper.merge_metadata!(values) }
     end
 
+    def update_ingested_metadata(reference, values, aliases = [])
+      update(reference) do |paper|
+        paper.merge_metadata!(ingested_metadata_for(paper, values))
+        paper.add_aliases!(aliases)
+      end
+    end
+
     def add_alias(reference, value)
       update(reference) { |paper| paper.add_alias!(value) }
     end
@@ -523,6 +530,7 @@ module Wrq
       versioned_identity = version ? identity.with_version(version) : identity.without_version
       identity_aliases = versioned_identity.aliases + Array(aliases)
       paper = find_by_key(identity.canonical_key) || find_by_alias(identity.canonical_key)
+      metadata = ingested_metadata_for(paper, metadata) if paper
       hash_matches = asset_lookups_by_hash(copied.sha256)
       same_record_hash = if paper
                            hash_matches.find { |lookup| lookup.paper.key == paper.key }
@@ -848,6 +856,69 @@ module Wrq
         raise
       end
       IngestResult.new(paper, asset, destination, true)
+    end
+
+    def ingested_metadata_for(paper, values)
+      incoming = copy_metadata_value(values)
+      unless incoming.is_a?(Hash)
+        raise InvalidRecord, "paper metadata must be an object"
+      end
+
+      existing_provider_data = paper.metadata["provider_data"]
+      if existing_provider_data.is_a?(Hash)
+        incoming_provider_data = incoming["provider_data"]
+        incoming["provider_data"] = if incoming_provider_data.is_a?(Hash)
+                                      merge_metadata_hashes(
+                                        existing_provider_data,
+                                        incoming_provider_data
+                                      )
+                                    else
+                                      copy_metadata_value(existing_provider_data)
+                                    end
+      end
+
+      # Ingests may update provider-owned values, but locally curated fields
+      # always win. A DOI stays provider-owned until `meta --doi` records its
+      # manual provenance. This method is only called with a freshly loaded
+      # record while the catalog lock is held.
+      provenance = paper.metadata["provenance"]
+      provenance = {} unless provenance.is_a?(Hash)
+      USER_METADATA_FIELDS.each do |key|
+        next if key == "publication_doi" && provenance[key] != "manual"
+        incoming.delete(key)
+      end
+      incoming
+    end
+
+    def merge_metadata_hashes(base, updates)
+      merged = copy_metadata_value(base)
+      updates.each do |key, value|
+        normalized_key = key.to_s
+        if merged[normalized_key].is_a?(Hash) && value.is_a?(Hash)
+          merged[normalized_key] = merge_metadata_hashes(
+            merged[normalized_key],
+            value
+          )
+        else
+          merged[normalized_key] = copy_metadata_value(value)
+        end
+      end
+      merged
+    end
+
+    def copy_metadata_value(value)
+      case value
+      when Hash
+        copy = {}
+        value.each do |key, item|
+          copy[key.to_s] = copy_metadata_value(item)
+        end
+        copy
+      when Array
+        value.map { |item| copy_metadata_value(item) }
+      else
+        value
+      end
     end
 
     def asset_lookups_by_hash(value)

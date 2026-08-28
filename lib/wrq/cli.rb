@@ -19,10 +19,6 @@ module Wrq
     COMMANDS = %w[add open search import info meta dedupe update remove doctor].freeze
     MAX_PDF_BYTES = 512 * 1024 * 1024
     ABANDONED_TEMP_AGE = 60 * 60
-    USER_OWNED_METADATA_FIELDS = %w[
-      venue year track status decision publication_doi tags provenance added_at
-    ].freeze
-
     HELP = <<~TEXT
       wrq v#{VERSION} - local-first research paper library
 
@@ -584,9 +580,7 @@ module Wrq
       canonical = Identity.parse(metadata[:base_id]).without_version
       resolved_version = metadata[:resolved_version] || identity.version
       record_metadata = arxiv_record_metadata(metadata)
-      if paper
-        record_metadata = provider_metadata_for_existing(paper, record_metadata)
-      else
+      unless paper
         record_metadata["tags"] = []
         record_metadata["status"] = "unread"
         record_metadata["added_at"] = timestamp
@@ -639,15 +633,14 @@ module Wrq
           @stderr.puts("Warning: Hugging Face enrichment failed for #{paper.key}: #{error.message}")
         end
       end
-      record_metadata = provider_metadata_for_existing(paper, record_metadata)
-
       existing = resolved_version && paper.asset_for_version(resolved_version)
       downloaded = false
       if existing && File.file?(library.asset_path(existing))
-        paper = library.update(paper.key) do |fresh|
-          fresh.merge_metadata!(record_metadata)
-          fresh.add_aliases!(Array(metadata[:aliases]))
-        end
+        paper = library.update_ingested_metadata(
+          paper.key,
+          record_metadata,
+          Array(metadata[:aliases])
+        )
         raise Error, "paper disappeared while refreshing metadata" unless paper
       else
         temporary = library.paths.temporary_path("arxiv-update")
@@ -787,28 +780,6 @@ module Wrq
       end
       record["provider_data"] = deep_stringify(metadata[:provider_data] || {})
       record
-    end
-
-    def provider_metadata_for_existing(paper, record_metadata)
-      merged = deep_copy(record_metadata)
-      existing_provider_data = paper.metadata["provider_data"]
-      if existing_provider_data.is_a?(Hash)
-        merged["provider_data"] = deep_merge_hashes(
-          existing_provider_data,
-          merged["provider_data"] || {}
-        )
-      end
-
-      # Provider updates may replace provider-owned fields, but metadata
-      # curated by the user must survive every ingestion path. A DOI remains
-      # provider-owned until the user explicitly edits it.
-      provenance = paper.metadata["provenance"]
-      provenance = {} unless provenance.is_a?(Hash)
-      USER_OWNED_METADATA_FIELDS.each do |key|
-        next if key == "publication_doi" && provenance[key] != "manual"
-        merged.delete(key)
-      end
-      merged
     end
 
     def merge_hugging_face(record_metadata, hf)
@@ -1228,19 +1199,6 @@ module Wrq
 
     def deep_copy(value)
       JSON.parse(JSON.generate(value))
-    end
-
-    def deep_merge_hashes(base, updates)
-      merged = deep_copy(base)
-      updates.each do |key, value|
-        normalized_key = key.to_s
-        if merged[normalized_key].is_a?(Hash) && value.is_a?(Hash)
-          merged[normalized_key] = deep_merge_hashes(merged[normalized_key], value)
-        else
-          merged[normalized_key] = deep_copy(value)
-        end
-      end
-      merged
     end
 
     def hugging_face_reference?(value)

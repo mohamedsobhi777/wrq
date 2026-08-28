@@ -48,6 +48,11 @@ only fills fields that are absent on an existing record; it cannot replace a
 trusted title, authors, tags, status, or the original `added_at` value. Inferred
 conference data retains provenance and is not presented as verified.
 
+Provider metadata is reconciled against the freshly reloaded record while the
+catalog write lock is held. A manual edit that commits while a provider request
+is in flight wins over that request, whether the provider write only refreshes
+an existing version or also ingests a newly downloaded version.
+
 ## Deduplication
 
 1. Canonical identifiers and aliases detect the same logical work.

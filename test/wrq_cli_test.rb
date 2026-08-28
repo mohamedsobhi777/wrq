@@ -3,6 +3,7 @@
 require "tmpdir"
 require "fileutils"
 require "digest"
+require "thread"
 require_relative "test_helper"
 require_relative "../lib/wrq/cli"
 
@@ -62,6 +63,21 @@ class WrqCliTest < Minitest::Test
         bytes: body.bytesize,
         url: metadata[:pdf_url]
       }
+    end
+  end
+
+  class BlockingFakeArxiv < FakeArxiv
+    def initialize(started:, release:, latest_version: 7, publication_doi: nil)
+      super(latest_version: latest_version, publication_doi: publication_doi)
+      @started = started
+      @release = release
+    end
+
+    def fetch(reference, refresh: false)
+      metadata = super
+      @started << true
+      @release.pop
+      metadata
     end
   end
 
@@ -581,6 +597,86 @@ class WrqCliTest < Minitest::Test
     assert_equal 0, status, error
     assert_equal "10.5555/provider-doi",
       @library.find("1706.03762").metadata["publication_doi"]
+  end
+
+  def test_concurrent_manual_doi_wins_over_in_flight_existing_version_refresh
+    assert_equal 0, run_cli("1706.03762", "--no-open").first
+    started = Queue.new
+    release = Queue.new
+    @arxiv = BlockingFakeArxiv.new(
+      started: started,
+      release: release,
+      latest_version: 7,
+      publication_doi: "10.5555/provider-refresh"
+    )
+
+    worker_result = nil
+    worker_error = nil
+    worker = Thread.new do
+      begin
+        worker_result = run_cli("update", "1706.03762")
+      rescue StandardError => error
+        worker_error = error
+      end
+    end
+    worker.report_on_exception = false
+    started.pop
+    begin
+      status, _output, error = run_cli(
+        "meta", "1706.03762", "--doi", "10.5555/manual-during-refresh"
+      )
+      assert_equal 0, status, error
+    ensure
+      release << true
+    end
+    assert worker.join(5), "provider refresh did not finish"
+    raise worker_error if worker_error
+
+    status, _output, error = worker_result
+    assert_equal 0, status, error
+    metadata = @library.find("1706.03762").metadata
+    assert_equal "10.5555/manual-during-refresh", metadata["publication_doi"]
+    assert_equal "manual", metadata.dig("provenance", "publication_doi")
+  end
+
+  def test_concurrent_manual_doi_wins_over_in_flight_new_version_ingest
+    assert_equal 0, run_cli("add", "1706.03762v1", "--no-open").first
+    started = Queue.new
+    release = Queue.new
+    @arxiv = BlockingFakeArxiv.new(
+      started: started,
+      release: release,
+      publication_doi: "10.5555/provider-new-version"
+    )
+
+    worker_result = nil
+    worker_error = nil
+    worker = Thread.new do
+      begin
+        worker_result = run_cli("add", "1706.03762v2", "--no-open")
+      rescue StandardError => error
+        worker_error = error
+      end
+    end
+    worker.report_on_exception = false
+    started.pop
+    begin
+      status, _output, error = run_cli(
+        "meta", "1706.03762", "--doi", "10.5555/manual-during-ingest"
+      )
+      assert_equal 0, status, error
+    ensure
+      release << true
+    end
+    assert worker.join(5), "new-version ingestion did not finish"
+    raise worker_error if worker_error
+
+    status, _output, error = worker_result
+    assert_equal 0, status, error
+    paper = @library.find("1706.03762")
+    assert_equal [1, 2], paper.assets.map(&:version).sort
+    assert_equal "10.5555/manual-during-ingest", paper.metadata["publication_doi"]
+    assert_equal "manual", paper.metadata.dig("provenance", "publication_doi")
   end
 
   def test_update_preserves_hugging_face_provider_data_on_transient_failure

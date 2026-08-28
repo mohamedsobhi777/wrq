@@ -92,6 +92,89 @@ else
   wrq_fail "hash dedup creates no second record or asset" "one managed PDF and one record" "$second_output" "wrq_storage.md"
 fi
 
+wrq_use_library "import-corrupt-hash-repair"
+repair_original="$WRQ_TEST_ROOT/repair-original.pdf"
+repair_move_source="$WRQ_TEST_ROOT/repair-move-source.pdf"
+wrq_make_pdf "$repair_original" "repair-authoritative-bytes"
+repair_output=$(wrq_run --json import "$repair_original")
+repair_status=$?
+wrq_expect_status "asset-repair fixture imports" "$repair_status" 0 "$repair_output" "wrq_storage.md"
+managed_repair_path=$(printf '%s' "$repair_output" | ruby -rjson -e 'print JSON.parse(STDIN.read).fetch(0).fetch("path")')
+expected_repair_hash=$(ruby -rdigest -e 'print Digest::SHA256.file(ARGV.fetch(0)).hexdigest' "$repair_original")
+printf '\ncorrupt managed bytes\n' >> "$managed_repair_path"
+cp "$repair_original" "$repair_move_source"
+output=$(wrq_run --json import --move "$repair_move_source")
+status=$?
+wrq_expect_status "reimport repairs a corrupt managed exact-hash asset" "$status" 0 "$output" "wrq_storage.md"
+actual_repair_hash=$(ruby -rdigest -e 'print Digest::SHA256.file(ARGV.fetch(0)).hexdigest' "$managed_repair_path")
+if [ ! -e "$repair_move_source" ] && [ -f "$managed_repair_path" ] && [ "$actual_repair_hash" = "$expected_repair_hash" ] && [ "$(wrq_file_count "$WRQ_PATH/library" '*.pdf')" -eq 1 ]; then
+  wrq_pass
+else
+  wrq_fail "--move deletes source only after corrupt asset repair" "source absent and one managed PDF with expected hash" "$output" "wrq_storage.md"
+fi
+
+wrq_use_library "import-missing-hash-repair"
+missing_original="$WRQ_TEST_ROOT/missing-original.pdf"
+missing_move_source="$WRQ_TEST_ROOT/missing-move-source.pdf"
+wrq_make_pdf "$missing_original" "missing-repair-authoritative-bytes"
+missing_output=$(wrq_run --json import "$missing_original")
+missing_status=$?
+wrq_expect_status "missing-asset fixture imports" "$missing_status" 0 "$missing_output" "wrq_storage.md"
+managed_missing_path=$(printf '%s' "$missing_output" | ruby -rjson -e 'print JSON.parse(STDIN.read).fetch(0).fetch("path")')
+expected_missing_hash=$(ruby -rdigest -e 'print Digest::SHA256.file(ARGV.fetch(0)).hexdigest' "$missing_original")
+rm "$managed_missing_path"
+cp "$missing_original" "$missing_move_source"
+output=$(wrq_run --json import --move "$missing_move_source")
+status=$?
+wrq_expect_status "reimport repairs a missing managed exact-hash asset" "$status" 0 "$output" "wrq_storage.md"
+actual_missing_hash=$(ruby -rdigest -e 'print Digest::SHA256.file(ARGV.fetch(0)).hexdigest' "$managed_missing_path")
+if [ ! -e "$missing_move_source" ] && [ -f "$managed_missing_path" ] && [ "$actual_missing_hash" = "$expected_missing_hash" ] && [ "$(wrq_file_count "$WRQ_PATH/library" '*.pdf')" -eq 1 ]; then
+  wrq_pass
+else
+  wrq_fail "--move deletes source only after missing asset repair" "source absent and one restored managed PDF with expected hash" "$output" "wrq_storage.md"
+fi
+
+wrq_use_library "import-arxiv-version-metadata"
+version_one="$WRQ_TEST_ROOT/1706.03762v1-Trusted-Findings.pdf"
+version_two="$WRQ_TEST_ROOT/1706.03762v2-Untrusted-Filename.pdf"
+wrq_make_pdf "$version_one" "arxiv-version-one"
+output=$(wrq_run --json import "$version_one")
+status=$?
+wrq_expect_status "first inferred arXiv version imports" "$status" 0 "$output" "wrq_storage.md"
+output=$(wrq_run --json meta 1706.03762 --venue NeurIPS --year 2025 --status read --tag trusted)
+status=$?
+wrq_expect_status "trusted arXiv metadata is recorded" "$status" 0 "$output" "wrq_storage.md"
+before_added_at=$(printf '%s' "$output" | ruby -rjson -e 'print JSON.parse(STDIN.read).fetch("metadata").fetch("added_at")')
+
+wrq_make_pdf "$version_two" "arxiv-version-two"
+output=$(wrq_run --json import "$version_two")
+status=$?
+wrq_expect_status "additional inferred arXiv version imports" "$status" 0 "$output" "wrq_storage.md"
+output=$(wrq_run --json info 1706.03762)
+status=$?
+wrq_expect_status "multi-version arXiv info succeeds" "$status" 0 "$output" "wrq_storage.md"
+wrq_expect_json "new version preserves trusted and user-owned metadata" "$output" '
+  metadata = value["metadata"]
+  metadata["title"] == "Trusted Findings" && metadata["venue"] == "NeurIPS" &&
+    metadata["year"] == 2025 && metadata["status"] == "read" &&
+    metadata["tags"] == ["trusted"] && value["assets"].length == 2
+' "wrq_storage.md"
+after_added_at=$(printf '%s' "$output" | ruby -rjson -e 'print JSON.parse(STDIN.read).fetch("metadata").fetch("added_at")')
+if [ "$before_added_at" = "$after_added_at" ]; then
+  wrq_pass
+else
+  wrq_fail "additional version preserves original added_at" "$before_added_at" "$after_added_at" "wrq_storage.md"
+fi
+
+version_one_path=$(wrq_run --print-path open 1706.03762v1)
+status=$?
+wrq_expect_status "exact-version open succeeds" "$status" 0 "$version_one_path" "wrq_command_line.md"
+if [ -f "$version_one_path" ] && grep -F -q -- "arxiv-version-one" "$version_one_path" && ! grep -F -q -- "arxiv-version-two" "$version_one_path"; then
+  wrq_pass
+else
+  wrq_fail "exact-version open selects the requested asset" "v1 PDF bytes" "$version_one_path" "wrq_command_line.md"
+fi
+
 wrq_use_library "import-same-basename"
 same_a="$WRQ_TEST_ROOT/same-a/paper.pdf"
 same_b="$WRQ_TEST_ROOT/same-b/paper.pdf"

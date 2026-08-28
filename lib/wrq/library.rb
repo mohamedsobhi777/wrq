@@ -365,15 +365,17 @@ module Wrq
     end
 
     def find_asset_by_hash(value)
-      match = HASH_RE.match(value.to_s)
-      return nil unless match
+      asset_lookups_by_hash(value).first
+    end
 
-      normalized = match[1].downcase
-      papers.each do |paper|
-        asset = paper.asset_for_hash(normalized)
-        return AssetLookup.new(paper, asset) if asset
+    def find_verified_asset_by_hash(value)
+      asset_lookups_by_hash(value).find do |lookup|
+        verified_asset_lookup?(
+          lookup,
+          lookup.asset.sha256,
+          lookup.asset.size
+        )
       end
-      nil
     end
 
     def asset_path(asset)
@@ -499,7 +501,7 @@ module Wrq
     def save_unlocked(paper)
       raise InvalidRecord, "expected a paper record" unless paper.is_a?(Paper)
       prepare!
-      MetadataCodec.write(@paths.record_path(paper.key), paper)
+      MetadataCodec.write(@paths.record_path(paper.key), paper, @paths.tmp)
       paper
     end
 
@@ -520,8 +522,22 @@ module Wrq
                       source_url:, added_at:)
       versioned_identity = version ? identity.with_version(version) : identity.without_version
       identity_aliases = versioned_identity.aliases + Array(aliases)
-      existing_hash = find_asset_by_hash(copied.sha256)
       paper = find_by_key(identity.canonical_key) || find_by_alias(identity.canonical_key)
+      hash_matches = asset_lookups_by_hash(copied.sha256)
+      same_record_hash = if paper
+                           hash_matches.find { |lookup| lookup.paper.key == paper.key }
+                         end
+      existing_hash = if same_record_hash
+                        same_record_hash
+                      elsif identity.local?
+                        hash_matches.find { |lookup| !lookup.paper.identity.local? } ||
+                          hash_matches.first
+                      else
+                        hash_matches.find { |lookup| lookup.paper.identity.local? } ||
+                          hash_matches.find do |lookup|
+                            verified_asset_lookup?(lookup, copied.sha256, copied.size)
+                          end
+                      end
 
       if existing_hash && (!paper || existing_hash.paper.key != paper.key)
         if identity.local?
@@ -531,7 +547,12 @@ module Wrq
           duplicate_paper = existing_hash.paper
           duplicate_paper.add_aliases!(identity_aliases)
           save_unlocked(duplicate_paper)
-          return reuse_existing_asset(duplicate_paper, existing_hash.asset, staged)
+          return reuse_existing_asset(
+            duplicate_paper,
+            existing_hash.asset,
+            staged,
+            copied
+          )
         end
 
         if existing_hash.paper.identity.local?
@@ -585,8 +606,8 @@ module Wrq
           )
           paper.add_asset!(target_asset)
         end
-        matching_path = asset_path(matching_asset)
-        existed = File.file?(matching_path)
+        matching_path = asset_path(target_asset)
+        existed = verified_asset_file?(target_asset, copied.sha256, copied.size)
         unless existed
           File.rename(staged, matching_path)
         end
@@ -659,9 +680,9 @@ module Wrq
       IngestResult.new(paper, asset, destination, destination_exists)
     end
 
-    def reuse_existing_asset(paper, asset, staged)
+    def reuse_existing_asset(paper, asset, staged, copied)
       existing_path = asset_path(asset)
-      if File.file?(existing_path)
+      if verified_asset_file?(asset, copied.sha256, copied.size)
         File.delete(staged)
         deduplicated = true
       else
@@ -722,7 +743,12 @@ module Wrq
       canonical_saved = false
       local_deleted = false
       begin
-        File.delete(staged) if File.exist?(staged)
+        local_path = asset_path(local_asset)
+        if verified_asset_file?(local_asset, copied.sha256, copied.size)
+          File.delete(staged) if File.exist?(staged)
+        else
+          File.rename(staged, local_path)
+        end
         if incoming_is_active
           promoted_asset, relocations = activate_asset_paths_unlocked(
             promoted,
@@ -791,7 +817,12 @@ module Wrq
         source_url: source_url,
         added_at: added_at
       )
-      paper.add_asset!(asset)
+      stored_asset = paper.add_asset!(asset)
+      unless stored_asset.equal?(asset)
+        asset = stored_asset
+        destination = asset_path(asset)
+        destination_exists = verified_asset_file?(asset, copied.sha256, copied.size)
+      end
 
       published = false
       relocation = nil
@@ -817,6 +848,34 @@ module Wrq
         raise
       end
       IngestResult.new(paper, asset, destination, true)
+    end
+
+    def asset_lookups_by_hash(value)
+      match = HASH_RE.match(value.to_s)
+      return [] unless match
+
+      normalized = match[1].downcase
+      matches = []
+      papers.each do |paper|
+        paper.assets.each do |asset|
+          matches << AssetLookup.new(paper, asset) if asset.sha256 == normalized
+        end
+      end
+      matches
+    end
+
+    def verified_asset_lookup?(lookup, sha256, size)
+      verified_asset_file?(lookup.asset, sha256, size)
+    end
+
+    def verified_asset_file?(asset, sha256, size)
+      path = asset_path(asset)
+      return false unless File.file?(path)
+      return false unless File.size(path) == size
+
+      Compat.sha256_file(path) == sha256
+    rescue SystemCallError, IOError
+      false
     end
 
     def available_destination(filename, sha256, retained: false)

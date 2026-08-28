@@ -13,9 +13,11 @@ updated dates, categories, primary category, PDF and abstract URLs, comments,
 journal reference, and publication DOI when present.
 
 arXiv requests use one connection at a time and a persistent minimum
-three-second interval. Responses are cached. A useful project User-Agent and
-the official acknowledgement are included. PDFs are for the user's local
-personal/research library and are not served or redistributed by `wrq`.
+three-second interval. The request gate lives in the user's global state
+directory, so independent `WRQ_PATH` libraries share the same limit. Responses
+are cached. A useful project User-Agent and the official acknowledgement are
+included. PDFs are for the user's local personal/research library and are not
+served or redistributed by `wrq`.
 Normal lookups may use a stale validated cache entry while offline. An explicit
 `wrq update` bypasses the cache and reports provider failure rather than
 claiming that stale metadata was refreshed.
@@ -25,7 +27,9 @@ claiming that stale metadata was refreshed.
 Hugging Face paper references are aliases for base arXiv identifiers. HF
 enrichment may add summaries, keywords, upvotes, organization, repository and
 project URLs, and linked Hub artifacts. It is optional, tolerant of missing or
-new fields, and does not provide the canonical PDF.
+new fields, and does not provide the canonical PDF. Current `linkedModels`,
+`linkedDatasets`, and `linkedSpaces` response fields are accepted alongside the
+legacy `models`, `datasets`, and `spaces` names.
 
 Public paper lookup does not require a token. When `HF_TOKEN` is present it is
 sent only to an allowlisted Hugging Face host and is never forwarded across a

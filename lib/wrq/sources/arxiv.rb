@@ -282,10 +282,7 @@ module Wrq
       end
 
       def default_throttle_path
-        return ENV["WRQ_ARXIV_THROTTLE_PATH"] if ENV["WRQ_ARXIV_THROTTLE_PATH"]
-
-        root = ENV["WRQ_PATH"] || File.expand_path("~/papers")
-        File.join(root, ".wrq", "arxiv-api.throttle")
+        Throttle.default_path
       end
 
       def default_cache_path

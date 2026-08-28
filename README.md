@@ -20,7 +20,7 @@ Once a paper is in the library, opening it does not require a network request.
 `wrq` keeps human-visible PDFs and schema-versioned JSON records on disk, with
 no account, database server, or shell integration.
 
-> **Project status:** `wrq` 0.1.0 is available from source, Nix, and Homebrew.
+> **Project status:** `wrq` 0.1.1 is available from source, Nix, and Homebrew.
 > RubyGems publishing will follow once trusted publishing is configured.
 
 ## Why wrq
@@ -254,8 +254,9 @@ conference works naturally. Recency breaks otherwise close matches.
 abstract/PDF/HTML URLs. Metadata comes from the official Atom API and the PDF
 comes from arXiv.
 
-Metadata access is serialized and persistently rate-limited to at least three
-seconds between arXiv API requests. Responses are cached. See the
+Metadata access is serialized through a user-global gate and persistently
+rate-limited to at least three seconds between arXiv API requests, even when
+different `WRQ_PATH` libraries are used. Responses are cached. See the
 [arXiv API manual](https://info.arxiv.org/help/api/user-manual.html) and
 [API terms](https://info.arxiv.org/help/api/tou.html).
 
@@ -283,6 +284,11 @@ sent only to an allowlisted Hugging Face host and is stripped on redirects.
   redirect boundaries.
 - Every generated/stored relative path is confined to the configured root.
 - `dedupe` only reports. `remove` requires confirmation and uses trash.
+
+MRI enforces provider response limits while reading the network stream. The
+current Spinel `Net::HTTP` runtime buffers each response before `wrq` can apply
+the same rejection limit; native builds therefore do not provide a hard
+pre-allocation memory bound for an unexpectedly large provider response.
 
 `WRQ_OPENER` can name a custom viewer executable. The selected file path is
 passed as an argument, not interpolated into a shell command.

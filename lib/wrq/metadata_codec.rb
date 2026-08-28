@@ -25,8 +25,8 @@ module Wrq
       nil
     end
 
-    def self.write(path, paper)
-      Compat.atomic_write(path, dump(paper))
+    def self.write(path, paper, temporary_directory = nil)
+      Compat.atomic_write(path, dump(paper), 0o600, temporary_directory)
     end
   end
 end

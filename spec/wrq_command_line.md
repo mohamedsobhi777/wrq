@@ -26,11 +26,18 @@ wrapper or `eval`.
 - Multi-term queries may satisfy different terms in different indexed fields,
   such as an author surname plus a conference name.
 - Only complete recognized identifiers and URLs trigger network access.
+- A complete recognized arXiv or SHA-256 selector is always resolved exactly.
+  If its logical record is absent, `open`, `info`, `meta`, `update`, and
+  `remove` report no match; they must not fall back to a fuzzy result whose
+  metadata happens to resemble the identifier.
 
 ## Commands
 
-- `wrq add REFERENCE` explicitly adds an arXiv or Hugging Face paper.
-- `wrq open SELECTOR` opens an existing paper selected by ID or fuzzy query.
+- `wrq add REFERENCE` explicitly adds an arXiv or Hugging Face paper. An
+  unrecognized reference is invalid command-line usage.
+- `wrq open SELECTOR` opens an existing paper selected by ID or fuzzy query. A
+  version-qualified arXiv selector opens that exact stored version and reports
+  no match if that version is not stored.
 - `wrq search [QUERY]` searches the local library.
 - `wrq import PATH...` imports PDF files. Directories are non-recursive unless
   `--recursive` is present. Import copies by default; `--move` removes a source

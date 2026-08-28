@@ -18,7 +18,12 @@ class Wrq < Formula
   end
 
   test do
-    assert_match "wrq 0.1.0", shell_output("#{bin}/wrq --version")
+    reported_version = shell_output("#{bin}/wrq --version").strip
+    if build.head?
+      assert_match(/^wrq \d+\.\d+\.\d+$/, reported_version)
+    else
+      assert_equal "wrq #{version}", reported_version
+    end
     assert_match "research paper", shell_output("#{bin}/wrq --help")
   end
 end

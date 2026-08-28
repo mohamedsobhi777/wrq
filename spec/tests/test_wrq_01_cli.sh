@@ -51,6 +51,10 @@ output=$(wrq_run add)
 status=$?
 wrq_expect_status "missing add reference is usage error" "$status" 2 "$output"
 
+output=$(wrq_run add not-a-paper)
+status=$?
+wrq_expect_status "malformed add reference is usage error" "$status" 2 "$output"
+
 output=$(wrq_run update)
 status=$?
 wrq_expect_status "missing update selector is usage error" "$status" 2 "$output"
@@ -63,6 +67,54 @@ output=$(wrq_run --print-path open definitely-not-present)
 status=$?
 wrq_expect_status "missing local paper is operational failure" "$status" 1 "$output"
 wrq_expect_contains "missing local paper has diagnostic" "$output" "no paper matches"
+
+for identity_kind in arxiv sha256; do
+  wrq_use_library "cli-exact-$identity_kind"
+  decoy_pdf="$WRQ_TEST_ROOT/exact-$identity_kind-decoy.pdf"
+  wrq_make_pdf "$decoy_pdf" "exact-$identity_kind-decoy"
+  import_output=$(wrq_run --json import "$decoy_pdf")
+  import_status=$?
+  wrq_expect_status "$identity_kind exact-selector decoy imports" "$import_status" 0 "$import_output" "wrq_storage.md"
+
+  if [ "$identity_kind" = "arxiv" ]; then
+    absent_selector="1706.03762"
+  else
+    absent_selector="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  fi
+  seed_output=$(wrq_run meta "exact $identity_kind decoy" --tag "$absent_selector")
+  seed_status=$?
+  wrq_expect_status "$identity_kind decoy metadata is searchable" "$seed_status" 0 "$seed_output" "wrq_storage.md"
+
+  output=$(wrq_run open "$absent_selector" --no-open)
+  status=$?
+  wrq_expect_status "absent $identity_kind open does not fuzzy-resolve" "$status" 1 "$output"
+  wrq_expect_contains "absent $identity_kind open reports no exact match" "$output" "no paper matches"
+
+  output=$(wrq_run info "$absent_selector")
+  status=$?
+  wrq_expect_status "absent $identity_kind info does not fuzzy-resolve" "$status" 1 "$output"
+  wrq_expect_contains "absent $identity_kind info reports no exact match" "$output" "no paper matches"
+
+  output=$(wrq_run meta "$absent_selector" --tag must-not-be-added)
+  status=$?
+  wrq_expect_status "absent $identity_kind meta does not fuzzy-resolve" "$status" 1 "$output"
+  wrq_expect_contains "absent $identity_kind meta reports no exact match" "$output" "no paper matches"
+
+  output=$(wrq_run update "$absent_selector")
+  status=$?
+  wrq_expect_status "absent $identity_kind update does not fuzzy-resolve" "$status" 1 "$output"
+  wrq_expect_contains "absent $identity_kind update reports no exact match" "$output" "no paper matches"
+
+  output=$(wrq_run remove "$absent_selector" --yes)
+  status=$?
+  wrq_expect_status "absent $identity_kind remove does not fuzzy-resolve" "$status" 1 "$output"
+  wrq_expect_contains "absent $identity_kind remove reports no exact match" "$output" "no paper matches"
+  if [ "$(wrq_file_count "$WRQ_PATH/.wrq/records" '*.json')" -eq 1 ]; then
+    wrq_pass
+  else
+    wrq_fail "absent $identity_kind remove preserves fuzzy decoy" "one authoritative record" "$output" "wrq_command_line.md"
+  fi
+done
 
 source_dir="$WRQ_TEST_ROOT/cli sources"
 mkdir -p "$source_dir"

@@ -92,7 +92,6 @@ compare_record() {
     WRQ_ARXIV_API_URL="$WRQ_FIXTURE_BASE_URL/api/query" \
     WRQ_ARXIV_PDF_URL="$WRQ_FIXTURE_BASE_URL/pdf" \
     WRQ_HF_API_URL="$WRQ_FIXTURE_BASE_URL/api/papers" \
-    WRQ_ARXIV_THROTTLE_PATH="$root/arxiv-api.throttle" \
     NO_COLOR=1 WRQ_WIDTH=80 WRQ_HEIGHT=24 \
     "$executable" "$@" 2>&1)
   status=$?

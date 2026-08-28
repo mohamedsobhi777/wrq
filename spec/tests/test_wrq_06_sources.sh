@@ -75,7 +75,10 @@ wrq_expect_status "HF-enriched info succeeds" "$status" 0 "$output" "wrq_sources
 wrq_expect_json "HF metadata is stored without replacing arXiv identity" "$output" '
   value["key"] == "arxiv:1706.03762" && value.dig("metadata", "title") == "Attention Is All You Need" &&
     value.dig("metadata", "hf_summary") == "The Transformer uses attention without recurrence." &&
-    value.dig("metadata", "provider_data", "hugging_face", "upvotes") == 4242
+    value.dig("metadata", "provider_data", "hugging_face", "upvotes") == 4242 &&
+    value.dig("metadata", "related_models", 0, "id") == "example/transformer" &&
+    value.dig("metadata", "related_datasets", 0, "id") == "example/corpus" &&
+    value.dig("metadata", "related_spaces", 0, "id") == "example/demo"
 ' "wrq_sources.md"
 
 wrq_use_library "source-legacy"

@@ -64,9 +64,9 @@ module Wrq
         github_repo = value_from(paper, raw, "github_repo", "githubRepo", "github")
         organization = paper["organization"] || raw["organization"]
         media_urls = array_from(paper, raw, "mediaUrls", "media_urls", "media")
-        models = array_from(paper, raw, "models")
-        datasets = array_from(paper, raw, "datasets")
-        spaces = array_from(paper, raw, "spaces")
+        models = array_from(paper, raw, "linkedModels", "models")
+        datasets = array_from(paper, raw, "linkedDatasets", "datasets")
+        spaces = array_from(paper, raw, "linkedSpaces", "spaces")
         hf_url = "https://huggingface.co/papers/#{resolved[:base_id]}"
         title = value_from(paper, raw, "title")
         upvotes = integer_or_nil(value_from(paper, raw, "upvotes", "likes"))

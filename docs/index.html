@@ -632,16 +632,15 @@
         <div>
           <h2>Start with one paper.</h2>
           <p>
-            Ruby 3.2 or newer is enough. Use the source install today, or run
-            the Nix flake directly.
+            Install the stable release with Homebrew, run the Nix flake
+            directly, or use Ruby 3.2 or newer from source.
           </p>
           <div class="actions">
             <a class="button secondary" href="https://github.com/mohamedsobhi777/wrq#readme">Read the docs</a>
           </div>
         </div>
-        <pre><code><span class="prompt">$</span> git clone https://github.com/mohamedsobhi777/wrq.git
-<span class="prompt">$</span> cd wrq
-<span class="prompt">$</span> make install PREFIX="$HOME/.local"
+        <pre><code><span class="prompt">$</span> brew tap mohamedsobhi777/wrq https://github.com/mohamedsobhi777/wrq
+<span class="prompt">$</span> brew install mohamedsobhi777/wrq/wrq
 <span class="prompt">$</span> wrq 1706.03762</code></pre>
       </section>
     </main>

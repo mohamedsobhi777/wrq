@@ -42,8 +42,11 @@ DOI, raw journal reference/comment, local venue/year/track/status/decision,
 tags, provenance, assets, active asset, added time, updated time, and last-opened
 time. Unknown upstream fields are tolerated.
 
-User-owned metadata is never silently overwritten by provider refreshes.
-Inferred conference data retains provenance and is not presented as verified.
+User-owned metadata is never silently overwritten by provider refreshes or by
+ingesting another asset or version. Metadata inferred from an imported filename
+only fills fields that are absent on an existing record; it cannot replace a
+trusted title, authors, tags, status, or the original `added_at` value. Inferred
+conference data retains provenance and is not presented as verified.
 
 ## Deduplication
 
@@ -54,12 +57,23 @@ Inferred conference data retains provenance and is not presented as verified.
 Different arXiv versions belong to one work but are not byte duplicates. No
 probable match is merged or removed automatically.
 
+Before exact-hash reuse, the managed asset's current bytes and size are checked
+against the record. If a staged copy has the expected hash and the recorded
+asset is missing or corrupt, the staged copy repairs the managed asset. With
+`import --move`, the source is removed only after that verification or repair
+has succeeded.
+
+`wrq dedupe` hashes the current managed bytes rather than trusting recorded
+digests. A missing, replaced, or corrupt managed asset cannot create a false
+exact group or be returned as the match for an external file.
+
 ## Safety
 
-- Downloads and record writes use temporary files followed by atomic rename.
+- Downloads and record writes stage temporary files in `.wrq/tmp` on the same
+  filesystem, then publish them with an atomic rename. Record-write temporary
+  files are not placed beside the authoritative JSON records.
 - A failed or interrupted download creates neither an asset nor a record.
 - Downloaded content must have a successful status and begin with `%PDF-`.
 - Provider redirects are bounded and credentials never cross host boundaries.
 - Generated and stored paths must remain under the configured library root.
 - Destructive removal is recoverable through `.wrq/trash`.
-

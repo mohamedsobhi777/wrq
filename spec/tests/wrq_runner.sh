@@ -243,7 +243,6 @@ wrq_start_fixture_server() {
   export WRQ_ARXIV_API_URL="$WRQ_FIXTURE_BASE_URL/api/query"
   export WRQ_ARXIV_PDF_URL="$WRQ_FIXTURE_BASE_URL/pdf"
   export WRQ_HF_API_URL="$WRQ_FIXTURE_BASE_URL/api/papers"
-  export WRQ_ARXIV_THROTTLE_PATH="$runtime_root/arxiv-api.throttle"
   export WRQ_FIXTURE_REQUEST_LOG WRQ_FIXTURE_BASE_URL
   return 0
 }

@@ -30,6 +30,19 @@ module Wrq
     class ResponseTooLarge < Error; end
     class InvalidPDF < Error; end
 
+    class DownloadStaging
+      attr_reader :file, :path, :device, :inode, :links
+
+      def initialize(file, path)
+        @file = file
+        @path = path
+        stat = file.stat
+        @device = stat.dev
+        @inode = stat.ino
+        @links = stat.nlink
+      end
+    end
+
     class HTTPError < Error
       attr_reader :status, :url, :body
 
@@ -84,7 +97,9 @@ module Wrq
     def download_pdf(url, destination:, headers: {}, max_bytes: nil)
       limit = normalize_limit(max_bytes)
       path = File.expand_path(destination.to_s)
-      staged_path = reserve_staging_path(path)
+      staging = reserve_staging_file(path)
+      staged_file = staging.file
+      staged_path = staging.path
 
       unless defined?(RubyVM)
         return download_pdf_buffered(
@@ -92,7 +107,7 @@ module Wrq
           headers,
           limit,
           path,
-          staged_path
+          staging
         )
       end
 
@@ -107,29 +122,35 @@ module Wrq
         prefix = String.new
 
         begin
-          File.open(staged_path, "wb") do |file|
-            response.read_body do |chunk|
-              byte_count += chunk.bytesize
-              if limit && byte_count > limit
-                raise ResponseTooLarge, "response exceeds #{limit} bytes"
-              end
-
-              prefix << chunk if prefix.bytesize < 5
-              prefix = prefix.byteslice(0, 5) if prefix.bytesize > 5
-              if prefix.bytesize >= 5 && !prefix.start_with?("%PDF-")
-                raise InvalidPDF, "downloaded response is not a PDF"
-              end
-              digest.update(chunk)
-              file.write(chunk)
+          response.read_body do |chunk|
+            byte_count += chunk.bytesize
+            if limit && byte_count > limit
+              raise ResponseTooLarge, "response exceeds #{limit} bytes"
             end
-            file.flush
+
+            prefix << chunk if prefix.bytesize < 5
+            prefix = prefix.byteslice(0, 5) if prefix.bytesize > 5
+            if prefix.bytesize >= 5 && !prefix.start_with?("%PDF-")
+              raise InvalidPDF, "downloaded response is not a PDF"
+            end
+            digest.update(chunk)
+            staged_file.write(chunk)
           end
+          staged_file.flush
 
           unless prefix.start_with?("%PDF-")
             raise InvalidPDF, "downloaded response is not a PDF"
           end
+          verify_staging_file!(
+            staged_path,
+            staging.device,
+            staging.inode,
+            staging.links
+          )
+          staged_file.close
           File.rename(staged_path, path)
         rescue StandardError, Interrupt
+          close_staging_file(staged_file)
           begin
             File.delete(staged_path) if File.exist?(staged_path)
           rescue SystemCallError
@@ -150,6 +171,7 @@ module Wrq
 
       result
     rescue StandardError, Interrupt
+      close_staging_file(staged_file) if staged_file
       begin
         File.delete(staged_path) if staged_path && File.exist?(staged_path)
       rescue SystemCallError
@@ -175,7 +197,9 @@ module Wrq
       }
     end
 
-    def download_pdf_buffered(url, headers, limit, path, staged_path)
+    def download_pdf_buffered(url, headers, limit, path, staging)
+      staged_path = staging.path
+      staged_file = staging.file
       response, final_url = perform_buffered(url, headers)
       body = response.body.to_s
       enforce_buffered_limit!(response, body, limit)
@@ -185,10 +209,15 @@ module Wrq
 
       digest = SHA256.new
       digest.update(body)
-      File.open(staged_path, "wb") do |file|
-        file.write(body)
-        file.flush
-      end
+      staged_file.write(body)
+      staged_file.flush
+      verify_staging_file!(
+        staged_path,
+        staging.device,
+        staging.inode,
+        staging.links
+      )
+      staged_file.close
       File.rename(staged_path, path)
       {
         status: response.code.to_i,
@@ -200,6 +229,7 @@ module Wrq
         url: final_url
       }
     rescue StandardError, Interrupt
+      close_staging_file(staged_file)
       begin
         File.delete(staged_path) if File.exist?(staged_path)
       rescue SystemCallError
@@ -403,17 +433,36 @@ module Wrq
       headers
     end
 
-    def reserve_staging_path(destination)
+    def reserve_staging_file(destination)
       index = 0
+      staging = nil
       loop do
         candidate = "#{destination}.part-#{Process.pid}-#{index}"
         begin
-          File.open(candidate, File::WRONLY | File::CREAT | File::EXCL, 0o600) {}
-          return candidate
+          file = File.open(candidate, File::WRONLY | File::CREAT | File::EXCL, 0o600)
+          staging = DownloadStaging.new(file, candidate)
+          break
         rescue Errno::EEXIST
           index += 1
         end
       end
+      staging
+    end
+
+    def verify_staging_file!(path, expected_device, expected_inode, expected_links)
+      path_stat = File.lstat(path)
+      if path_stat.symlink? || path_stat.nlink != 1 || expected_links != 1 ||
+         path_stat.dev != expected_device || path_stat.ino != expected_inode
+        raise Error, "download staging file changed while writing: #{path}"
+      end
+      nil
+    rescue Errno::ENOENT
+      raise Error, "download staging file disappeared while writing: #{path}"
+    end
+
+    def close_staging_file(file)
+      file.close unless file.closed?
+    rescue SystemCallError, IOError
     end
   end
 end

@@ -177,6 +177,41 @@ class WrqLibraryTest < Minitest::Test
     end
   end
 
+  def test_reingesting_cross_identity_hash_reuses_the_recorded_asset_without_orphans
+    with_library do |library, directory|
+      first = File.join(directory, "first.pdf")
+      second = File.join(directory, "second.pdf")
+      repeated = File.join(directory, "repeated.pdf")
+      write_pdf(first, "shared payload")
+      write_pdf(second, "shared payload")
+      write_pdf(repeated, "shared payload")
+
+      library.ingest_pdf(
+        identity: Wrq::Identity.parse("2401.01234v1"),
+        source_path: first
+      )
+      original = library.ingest_pdf(
+        identity: Wrq::Identity.parse("2402.12345v1"),
+        source_path: second,
+        metadata: { "title" => "Original title" }
+      )
+      result = library.ingest_pdf(
+        identity: Wrq::Identity.parse("2402.12345v1"),
+        source_path: repeated,
+        metadata: { "title" => "Updated title" }
+      )
+
+      paper = library.find("2402.12345")
+      assert result.deduplicated?
+      assert_equal "Updated title", paper.title
+      assert_equal 1, paper.assets.length
+      assert_equal paper.assets.first, result.asset
+      assert_equal library.asset_path(paper.assets.first), result.path
+      assert_equal original.path, result.path
+      assert_empty Dir.entries(library.paths.versions).grep(/\.pdf\z/)
+    end
+  end
+
   def test_an_aliased_identity_adds_future_versions_to_the_same_record
     with_library do |library, directory|
       local_source = File.join(directory, "local.pdf")
@@ -385,6 +420,49 @@ class WrqLibraryTest < Minitest::Test
       refute File.exist?(source)
       assert_equal result.paper, library.find("unknown-paper")
       assert_equal result.paper, library.find("sha256:#{result.asset.sha256}")
+    end
+  end
+
+  def test_move_reimport_repairs_a_corrupt_catalogued_asset_before_removing_source
+    with_library do |library, directory|
+      first = File.join(directory, "first.pdf")
+      replacement = File.join(directory, "replacement.pdf")
+      write_pdf(first, "known good payload")
+      write_pdf(replacement, "known good payload")
+      expected = File.binread(replacement)
+      original = library.import_pdf(source_path: first)
+      File.binwrite(original.path, "%PDF-1.7\ncorrupt\n")
+
+      repaired = library.import_pdf(source_path: replacement, move: true)
+
+      refute repaired.deduplicated?
+      refute File.exist?(replacement)
+      assert_equal expected, File.binread(repaired.path)
+      assert_equal repaired.asset.sha256, library.sha256(repaired.path)
+      assert_equal repaired.asset.size, File.size(repaired.path)
+    end
+  end
+
+  def test_provider_promotion_repairs_a_missing_local_asset_from_staged_bytes
+    with_library do |library, directory|
+      local_source = File.join(directory, "local.pdf")
+      provider_source = File.join(directory, "provider.pdf")
+      write_pdf(local_source, "recoverable payload")
+      write_pdf(provider_source, "recoverable payload")
+      local = library.import_pdf(source_path: local_source)
+      File.delete(local.path)
+
+      promoted = library.ingest_pdf(
+        identity: Wrq::Identity.parse("2401.01234v1"),
+        source_path: provider_source,
+        metadata: { "title" => "Recovered paper" }
+      )
+
+      assert promoted.deduplicated?
+      assert File.file?(promoted.path)
+      assert_equal promoted.asset.sha256, library.sha256(promoted.path)
+      assert_nil library.find_by_key(local.paper.key)
+      assert_equal ["arxiv:2401.01234"], library.papers.map(&:key)
     end
   end
 

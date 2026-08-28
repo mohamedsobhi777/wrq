@@ -46,14 +46,26 @@ module Wrq
       expanded
     end
 
-    def self.atomic_write(path, contents, mode = 0o600)
+    def self.atomic_write(path, contents, mode = 0o600, temporary_directory = nil)
       destination = File.expand_path(path.to_s)
       mkdir_p(File.dirname(destination))
+      temporary_root = if temporary_directory
+                         mkdir_p(temporary_directory)
+                       else
+                         File.dirname(destination)
+                       end
       temporary = nil
       io = nil
 
       100.times do |attempt|
-        candidate = "#{destination}.tmp-#{Process.pid}-#{attempt}"
+        candidate = if temporary_directory
+                      File.join(
+                        temporary_root,
+                        "#{File.basename(destination)}.tmp-#{Process.pid}-#{attempt}"
+                      )
+                    else
+                      "#{destination}.tmp-#{Process.pid}-#{attempt}"
+                    end
         begin
           io = File.open(candidate, "wbx", mode)
           temporary = candidate

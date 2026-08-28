@@ -161,11 +161,13 @@ class WrqCliTest < Minitest::Test
     status, output, = run_cli("--help")
     assert_equal 0, status
     assert_includes output, "local-first research paper library"
+    assert_includes output, "\n  WRQ_OPENER"
+    refute_includes output, "\n    WRQ_OPENER"
     refute Dir.exist?(@root)
 
     status, output, = run_cli("--version")
     assert_equal 0, status
-    assert_equal "wrq 0.1.0\n", output
+    assert_equal "wrq #{Wrq::VERSION}\n", output
     refute Dir.exist?(@root)
   end
 
@@ -196,6 +198,35 @@ class WrqCliTest < Minitest::Test
     assert_equal ["1706.03762v1", "1706.03762v2"], @arxiv.fetches
   end
 
+  def test_adding_a_new_version_preserves_user_metadata_and_provider_enrichment
+    assert_equal 0, run_cli(
+      "https://huggingface.co/papers/1706.03762v1",
+      "--no-open"
+    ).first
+    assert_equal 0, run_cli(
+      "meta", "1706.03762",
+      "--venue", "NeurIPS", "--year", "2017", "--track", "Main",
+      "--status", "read", "--decision", "accepted",
+      "--doi", "10.5555/manual-doi", "--tag", "keep"
+    ).first
+    before = @library.find("1706.03762").metadata
+
+    @arxiv = FakeArxiv.new(publication_doi: "10.5555/provider-doi")
+    status, _output, error = run_cli("add", "1706.03762v2", "--no-open")
+    assert_equal 0, status, error
+
+    metadata = @library.find("1706.03762").metadata
+    assert_equal "NeurIPS", metadata["venue"]
+    assert_equal 2017, metadata["year"]
+    assert_equal "Main", metadata["track"]
+    assert_equal "read", metadata["status"]
+    assert_equal "accepted", metadata["decision"]
+    assert_equal "10.5555/manual-doi", metadata["publication_doi"]
+    assert_equal ["keep"], metadata["tags"]
+    assert_equal before["added_at"], metadata["added_at"]
+    assert_equal 42, metadata.dig("provider_data", "hugging_face", "upvotes")
+  end
+
   def test_opening_an_exact_version_makes_it_the_active_local_asset
     assert_equal 0, run_cli("add", "1706.03762v1", "--no-open").first
     assert_equal 0, run_cli("add", "1706.03762v2", "--no-open").first
@@ -212,6 +243,58 @@ class WrqCliTest < Minitest::Test
     assert_equal 0, status, error
     assert @opener.paths.last.include?("-v1")
     assert_equal 2, @arxiv.fetches.length
+  end
+
+  def test_open_command_and_path_mode_honor_an_exact_version
+    assert_equal 0, run_cli("add", "1706.03762v1", "--no-open").first
+    assert_equal 0, run_cli("add", "1706.03762v2", "--no-open").first
+
+    status, output, error = run_cli(
+      "open", "https://arxiv.org/abs/1706.03762v1", "--print-path"
+    )
+    assert_equal 0, status, error
+    assert_includes output, "-v1"
+    refute_includes output, "-v2"
+
+    status, _output, error = run_cli("open", "1706.03762v3", "--print-path")
+    assert_equal 1, status
+    assert_includes error, "no paper matches"
+  end
+
+  def test_absent_recognized_identity_never_fuzzy_resolves
+    selectors = [
+      "1706.03762",
+      "1706.03762v1",
+      "f" * 64
+    ]
+    selectors.each_with_index do |selector, index|
+      source = write_pdf(
+        "unrelated-#{index}.pdf",
+        "%PDF-1.4\nunrelated #{index}\n"
+      )
+      @library.import_pdf(
+        source_path: source,
+        metadata: { "title" => selector, "status" => "unread" }
+      )
+    end
+
+    selectors.each do |selector|
+      [
+        ["open", selector, "--print-path"],
+        ["info", selector, "--json"],
+        ["meta", selector, "--status", "read"],
+        ["update", selector],
+        ["remove", selector, "--yes"]
+      ].each do |arguments|
+        status, _output, error = run_cli(*arguments)
+        assert_equal 1, status, arguments.inspect
+        assert_includes error, "no paper matches", arguments.inspect
+      end
+    end
+
+    assert_equal 3, @library.papers.length
+    assert @library.papers.all? { |paper| paper.metadata["status"] == "unread" }
+    assert_empty @arxiv.fetches
   end
 
   def test_hugging_face_url_enriches_without_replacing_arxiv_authors
@@ -239,6 +322,25 @@ class WrqCliTest < Minitest::Test
     refute File.exist?(second)
     assert_equal 1, @library.papers.length
     assert_equal 1, @library.papers.first.assets.length
+  end
+
+  def test_import_with_arxiv_filename_does_not_replace_catalog_metadata
+    assert_equal 0, run_cli("add", "1706.03762v7", "--no-open").first
+    assert_equal 0, run_cli(
+      "meta", "1706.03762", "--status", "read", "--tag", "keep"
+    ).first
+    duplicate = write_pdf(
+      "1706.03762v7-copy.pdf",
+      "%PDF-1.4\n1706.03762v7\n"
+    )
+
+    status, _output, error = run_cli("import", duplicate)
+    assert_equal 0, status, error
+    paper = @library.find("1706.03762")
+    assert_equal "Attention Is All You Need", paper.title
+    assert_equal ["Ashish Vaswani", "Noam Shazeer"], paper.authors
+    assert_equal "read", paper.metadata["status"]
+    assert_equal ["keep"], paper.metadata["tags"]
   end
 
   def test_same_basename_imports_do_not_create_ambiguous_aliases
@@ -344,6 +446,31 @@ class WrqCliTest < Minitest::Test
     assert_equal @library.papers.first.key, report["external_files"].first["duplicate_of"]
     assert File.file?(duplicate)
     assert_equal [], report["deleted"]
+  end
+
+  def test_dedupe_rehashes_managed_assets_and_ignores_a_stale_recorded_hash
+    first = write_pdf("first-external.pdf", "%PDF-1.4\nshared bytes\n")
+    second = write_pdf("second-external.pdf", "%PDF-1.4\nshared bytes\n")
+    external = write_pdf("external-copy.pdf", "%PDF-1.4\nshared bytes\n")
+    first_result = @library.ingest_pdf(
+      identity: Wrq::Identity.parse("2401.01234v1"),
+      source_path: first
+    )
+    second_result = @library.ingest_pdf(
+      identity: Wrq::Identity.parse("2402.12345v1"),
+      source_path: second
+    )
+    replacement = write_pdf("replacement.pdf", "%PDF-1.4\nchanged bytes\n")
+    File.rename(replacement, first_result.path)
+
+    status, output, error = run_cli("dedupe", external, "--json")
+    assert_equal 0, status, error
+    report = JSON.parse(output)
+    assert_empty report["exact_hash_groups"]
+    row = report["external_files"].first
+    assert_equal "arxiv:2402.12345", row["duplicate_of"]
+    assert_equal second_result.path, row["library_path"]
+    assert_equal "%PDF-1.4\nchanged bytes\n", File.binread(first_result.path)
   end
 
   def test_probable_dedupe_requires_author_agreement_when_authors_are_known
@@ -566,6 +693,10 @@ class WrqCliTest < Minitest::Test
     status, _output, error = run_cli("search", "attention", "--bogus")
     assert_equal 2, status
     assert_includes error, "unknown option"
+
+    status, _output, error = run_cli("add", "not-a-paper")
+    assert_equal 2, status
+    assert_includes error, "requires an arXiv or Hugging Face reference"
 
     [
       ["open", " "],

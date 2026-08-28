@@ -20,7 +20,7 @@ module Wrq
     MAX_PDF_BYTES = 512 * 1024 * 1024
     ABANDONED_TEMP_AGE = 60 * 60
     USER_OWNED_METADATA_FIELDS = %w[
-      venue year track status decision publication_doi tags provenance
+      venue year track status decision publication_doi tags provenance added_at
     ].freeze
 
     HELP = <<~TEXT
@@ -67,7 +67,7 @@ module Wrq
 
       Environment:
         WRQ_PATH          Library root (default: ~/papers)
-          WRQ_OPENER        Viewer executable (default: open/xdg-open/explorer)
+        WRQ_OPENER        Viewer executable (default: open/xdg-open/explorer)
         HF_TOKEN          Optional Hugging Face token for higher quotas
     TEXT
 
@@ -228,9 +228,8 @@ module Wrq
     def default_arxiv_source
       @arxiv_source ||= begin
         library.prepare!
-        throttle_path = File.join(library.paths.cache, "arxiv-api.throttle")
         Sources::Arxiv.new(
-          throttle: Throttle.new(path: throttle_path),
+          throttle: Throttle.new(path: Throttle.default_path(@env)),
           cache_path: library.paths.cache
         )
       end
@@ -250,8 +249,10 @@ module Wrq
       reject_unknown_options!(args)
       raise UsageError, "add requires one paper reference" if args.empty?
       raise UsageError, "add accepts one paper reference" if args.length > 1
-      identity = Identity.parse(args.first)
-      raise UsageError, "add requires an arXiv or Hugging Face reference" unless identity.arxiv?
+      identity = Identity.recognize(args.first)
+      unless identity && identity.arxiv?
+        raise UsageError, "add requires an arXiv or Hugging Face reference"
+      end
       add_or_open_reference(args.first)
     end
 
@@ -260,7 +261,9 @@ module Wrq
       selector = selector_argument(args, "open")
       paper = resolve_one(selector)
       return not_found(selector) unless paper
-      finish_paper(paper)
+      asset, specific = exact_asset_selection(paper, selector)
+      return not_found(selector) if specific && !asset
+      finish_paper(paper, asset: asset)
     end
 
     def command_search(args)
@@ -289,6 +292,10 @@ module Wrq
           "imported_from" => source,
           "added_at" => timestamp
         }
+        existing = identity && library.find(identity.canonical_key)
+        if existing
+          metadata = metadata.reject { |key, _value| existing.metadata.key?(key) }
+        end
         result = library.import_pdf(
           source_path: source,
           identity: identity && identity.without_version,
@@ -397,8 +404,11 @@ module Wrq
           path = library.asset_path(asset)
           next if seen_paths[path]
           seen_paths[path] = true
-          hash_groups[asset.sha256] ||= []
-          hash_groups[asset.sha256] << {
+          next if File.symlink?(path) || !File.file?(path)
+
+          actual_hash = library.sha256(path)
+          hash_groups[actual_hash] ||= []
+          hash_groups[actual_hash] << {
             "paper" => paper.key,
             "path" => path,
             "version" => asset.version
@@ -437,7 +447,7 @@ module Wrq
       unless args.empty?
         collect_pdf_files(args, recursive: recursive).each do |path|
           hash = library.sha256(path)
-          lookup = library.find_asset_by_hash(hash)
+          lookup = library.find_verified_asset_by_hash(hash)
           external << {
             "path" => path,
             "sha256" => hash,
@@ -541,7 +551,9 @@ module Wrq
       if @options[:print_path] || @options[:no_open]
         paper = resolve_one(query)
         return not_found(query) unless paper
-        return finish_paper(paper)
+        asset, specific = exact_asset_selection(paper, query)
+        return not_found(query) if specific && !asset
+        return finish_paper(paper, asset: asset)
       end
 
       result = if defined?(RubyVM) && @selector_class != Selector
@@ -572,9 +584,13 @@ module Wrq
       canonical = Identity.parse(metadata[:base_id]).without_version
       resolved_version = metadata[:resolved_version] || identity.version
       record_metadata = arxiv_record_metadata(metadata)
-      record_metadata["tags"] = []
-      record_metadata["status"] = "unread"
-      record_metadata["added_at"] = timestamp
+      if paper
+        record_metadata = provider_metadata_for_existing(paper, record_metadata)
+      else
+        record_metadata["tags"] = []
+        record_metadata["status"] = "unread"
+        record_metadata["added_at"] = timestamp
+      end
 
       if hugging_face_reference?(reference)
         begin
@@ -615,13 +631,6 @@ module Wrq
       metadata = arxiv_source.refresh(paper.identity.base_id)
       resolved_version = metadata[:resolved_version]
       record_metadata = arxiv_record_metadata(metadata)
-      existing_provider_data = paper.metadata["provider_data"]
-      if existing_provider_data.is_a?(Hash)
-        record_metadata["provider_data"] = deep_merge_hashes(
-          existing_provider_data,
-          record_metadata["provider_data"] || {}
-        )
-      end
       if enrich_hf || paper.metadata.dig("provider_data", "hugging_face")
         begin
           hf = hugging_face_source.fetch(paper.identity.base_id)
@@ -630,16 +639,7 @@ module Wrq
           @stderr.puts("Warning: Hugging Face enrichment failed for #{paper.key}: #{error.message}")
         end
       end
-
-      # Provider refreshes update provider-owned fields only. These fields are
-      # curated by the user (including an initially inferred DOI), so once a
-      # record exists they must never be silently replaced by upstream data.
-      provenance = paper.metadata["provenance"]
-      provenance = {} unless provenance.is_a?(Hash)
-      USER_OWNED_METADATA_FIELDS.each do |key|
-        next if key == "publication_doi" && provenance[key] != "manual"
-        record_metadata.delete(key)
-      end
+      record_metadata = provider_metadata_for_existing(paper, record_metadata)
 
       existing = resolved_version && paper.asset_for_version(resolved_version)
       downloaded = false
@@ -745,9 +745,24 @@ module Wrq
       return nil if value.empty?
       exact = library.find(value)
       return exact if exact
+      return nil if Identity.recognize(value)
 
       result = Search.new(library.papers, now: now).call(value, limit: 1).first
       result && result.record
+    end
+
+    def exact_asset_selection(paper, selector)
+      identity = Identity.recognize(selector.to_s.strip)
+      return [nil, false] unless identity
+      return [nil, true] unless paper.key == identity.canonical_key
+
+      if identity.local?
+        return [paper.asset_for_hash(identity.base_id), true]
+      end
+      if identity.version
+        return [paper.asset_for_version(identity.version), true]
+      end
+      [nil, false]
     end
 
     def selector_argument(args, command, suffix: "")
@@ -772,6 +787,28 @@ module Wrq
       end
       record["provider_data"] = deep_stringify(metadata[:provider_data] || {})
       record
+    end
+
+    def provider_metadata_for_existing(paper, record_metadata)
+      merged = deep_copy(record_metadata)
+      existing_provider_data = paper.metadata["provider_data"]
+      if existing_provider_data.is_a?(Hash)
+        merged["provider_data"] = deep_merge_hashes(
+          existing_provider_data,
+          merged["provider_data"] || {}
+        )
+      end
+
+      # Provider updates may replace provider-owned fields, but metadata
+      # curated by the user must survive every ingestion path. A DOI remains
+      # provider-owned until the user explicitly edits it.
+      provenance = paper.metadata["provenance"]
+      provenance = {} unless provenance.is_a?(Hash)
+      USER_OWNED_METADATA_FIELDS.each do |key|
+        next if key == "publication_doi" && provenance[key] != "manual"
+        merged.delete(key)
+      end
+      merged
     end
 
     def merge_hugging_face(record_metadata, hf)

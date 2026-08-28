@@ -6,14 +6,29 @@ module Wrq
   # from both passing the same rate-limit window.
   class Throttle
     DEFAULT_INTERVAL = 3.0
-    DISABLE_ENV = "WRQ_DISABLE_THROTTLE"
 
     class UnsafeState < StandardError; end
+
+    def self.default_path(env = nil)
+      state_home = environment_value(env, "XDG_STATE_HOME").to_s.strip
+      if state_home.empty?
+        home = environment_value(env, "HOME").to_s.strip
+        home = File.expand_path("~") if home.empty?
+        state_home = File.join(File.expand_path(home), ".local", "state")
+      else
+        state_home = File.expand_path(state_home)
+      end
+      File.join(state_home, "wrq", "arxiv-api.throttle")
+    end
+
+    def self.environment_value(env, name)
+      env ? env[name] : ENV[name]
+    end
 
     def initialize(path:, interval: DEFAULT_INTERVAL, disabled: nil, clock: nil, sleeper: nil)
       @path = File.expand_path(path.to_s)
       @interval = Float(interval)
-      @disabled = disabled.nil? ? env_disabled? : !!disabled
+      @disabled = !!disabled
       @clock = clock
       @sleeper = sleeper
 
@@ -80,11 +95,6 @@ module Wrq
       else
         sleep(seconds)
       end
-    end
-
-    def env_disabled?
-      value = ENV[DISABLE_ENV].to_s.downcase
-      value == "1" || value == "true" || value == "yes"
     end
 
     def read_timestamp(file)

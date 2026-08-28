@@ -45,6 +45,33 @@ status=$?
 wrq_expect_status "plain dedupe report succeeds" "$status" 0 "$output"
 wrq_expect_contains "plain dedupe states safety behavior" "$output" "No files were deleted."
 
+wrq_use_library "dedupe-rehash"
+rehash_first="$WRQ_TEST_ROOT/2401.01234v1-First.pdf"
+rehash_second="$WRQ_TEST_ROOT/2402.12345v1-Second.pdf"
+rehash_external="$WRQ_TEST_ROOT/rehash-external.pdf"
+rehash_replacement="$WRQ_TEST_ROOT/rehash-replacement.pdf"
+wrq_make_pdf "$rehash_first" "rehash-shared-bytes"
+cp "$rehash_first" "$rehash_second"
+cp "$rehash_first" "$rehash_external"
+first_output=$(wrq_run --json import "$rehash_first")
+first_status=$?
+second_output=$(wrq_run --json import "$rehash_second")
+second_status=$?
+wrq_expect_status "first rehash fixture imports" "$first_status" 0 "$first_output" "wrq_storage.md"
+wrq_expect_status "second rehash fixture imports" "$second_status" 0 "$second_output" "wrq_storage.md"
+first_managed=$(printf '%s' "$first_output" | ruby -rjson -e 'print JSON.parse(STDIN.read).fetch(0).fetch("path")')
+wrq_make_pdf "$rehash_replacement" "changed-after-cataloging"
+mv "$rehash_replacement" "$first_managed"
+
+output=$(wrq_run --json dedupe "$rehash_external")
+status=$?
+wrq_expect_status "dedupe rehashes current managed bytes" "$status" 0 "$output" "wrq_storage.md"
+wrq_expect_json "stale recorded hash is excluded from exact groups and external lookup" "$output" '
+  value["exact_hash_groups"] == {} &&
+    value.dig("external_files", 0, "duplicate_of") == "arxiv:2402.12345" &&
+    value.dig("external_files", 0, "library_path").to_s.include?("2402.12345")
+' "wrq_storage.md"
+
 wrq_use_library "remove-confirmation"
 remove_source="$WRQ_TEST_ROOT/remove-this-paper.pdf"
 wrq_make_pdf "$remove_source" "remove"

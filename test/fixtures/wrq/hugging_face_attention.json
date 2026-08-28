@@ -14,8 +14,8 @@
   "githubRepo": "https://github.com/example/transformer",
   "organization": {"name": "Example Research"},
   "mediaUrls": ["https://example.test/diagram.png"],
-  "models": [{"id": "example/transformer"}],
-  "datasets": [{"id": "example/corpus"}],
-  "spaces": [{"id": "example/demo"}],
+  "linkedModels": [{"id": "example/transformer"}],
+  "linkedDatasets": [{"id": "example/corpus"}],
+  "linkedSpaces": [{"id": "example/demo"}],
   "futureField": {"kept": true}
 }

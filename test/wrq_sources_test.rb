@@ -95,6 +95,22 @@ class WrqSourcesTest < Minitest::Test
     end
   end
 
+  class SwappingStagingHTTPClient < FixtureHTTPClient
+    def initialize(body, victim)
+      super(body)
+      @victim = victim
+    end
+
+    private
+
+    def reserve_staging_file(destination)
+      staging = super
+      File.delete(staging.path)
+      File.symlink(@victim, staging.path)
+      staging
+    end
+  end
+
   def fixture(name)
     File.read(File.join(FIXTURES, name))
   end
@@ -684,10 +700,29 @@ class WrqSourcesTest < Minitest::Test
     assert_equal "https://example.test/transformer", metadata[:project_page]
     assert_equal "https://github.com/example/transformer", metadata[:github_repo]
     assert_equal "example/transformer", metadata[:models].first["id"]
+    assert_equal "example/corpus", metadata[:datasets].first["id"]
+    assert_equal "example/demo", metadata[:spaces].first["id"]
     assert_equal true,
       metadata.dig(:provider_data, :hugging_face, :raw, "futureField", "kept")
     assert_equal "avaswani",
       metadata.dig(:provider_data, :hugging_face, :authors, 0, :username)
+  end
+
+  def test_hugging_face_retains_legacy_artifact_field_compatibility
+    source = Wrq::Sources::HuggingFace.new(http_client: FakeHTTP.new)
+    metadata = source.parse_json(
+      JSON.generate(
+        "id" => "1706.03762",
+        "models" => [{ "id" => "legacy/model" }],
+        "datasets" => [{ "id" => "legacy/dataset" }],
+        "spaces" => [{ "id" => "legacy/space" }]
+      ),
+      requested_id: "1706.03762"
+    )
+
+    assert_equal "legacy/model", metadata[:models].first["id"]
+    assert_equal "legacy/dataset", metadata[:datasets].first["id"]
+    assert_equal "legacy/space", metadata[:spaces].first["id"]
   end
 
   def test_hugging_face_fetch_uses_base_id_without_leaking_token_to_override
@@ -796,6 +831,25 @@ class WrqSourcesTest < Minitest::Test
     end
   end
 
+  def test_http_client_does_not_follow_a_swapped_staging_symlink
+    body = fixture("minimal.pdf")
+    Dir.mktmpdir("wrq-pdf-staging-swap") do |directory|
+      destination = File.join(directory, "paper.pdf")
+      victim = File.join(directory, "victim.txt")
+      File.write(destination, "existing paper")
+      File.write(victim, "DO NOT CLOBBER")
+      client = SwappingStagingHTTPClient.new(body, victim)
+
+      error = assert_raises(Wrq::HTTPClient::Error) do
+        client.download_pdf("https://fixture.test/paper.pdf", destination: destination)
+      end
+      assert_includes error.message, "staging file changed"
+      assert_equal "existing paper", File.read(destination)
+      assert_equal "DO NOT CLOBBER", File.read(victim)
+      assert_empty Dir.glob("#{destination}.part-*")
+    end
+  end
+
   def test_http_client_enforces_streamed_pdf_limit
     body = fixture("minimal.pdf")
     client = FixtureHTTPClient.new(body)
@@ -832,6 +886,30 @@ class WrqSourcesTest < Minitest::Test
     end
   end
 
+  def test_throttle_default_path_is_shared_across_library_roots
+    Dir.mktmpdir("wrq-throttle-home") do |home|
+      first = Wrq::Throttle.default_path(
+        "HOME" => home,
+        "WRQ_PATH" => File.join(home, "papers-one")
+      )
+      second = Wrq::Throttle.default_path(
+        "HOME" => home,
+        "WRQ_PATH" => File.join(home, "papers-two")
+      )
+
+      assert_equal first, second
+      assert_equal File.join(home, ".local", "state", "wrq", "arxiv-api.throttle"), first
+    end
+  end
+
+  def test_throttle_default_path_honors_state_home_without_a_path_bypass
+    assert_equal "/tmp/wrq-state/wrq/arxiv-api.throttle",
+      Wrq::Throttle.default_path(
+        "XDG_STATE_HOME" => "/tmp/wrq-state",
+        "WRQ_ARXIV_THROTTLE_PATH" => "/tmp/wrq-fixture.throttle"
+      )
+  end
+
   def test_throttle_can_be_disabled_for_tests
     Dir.mktmpdir("wrq-throttle-disabled") do |directory|
       path = File.join(directory, "never-created")
@@ -841,13 +919,13 @@ class WrqSourcesTest < Minitest::Test
     end
   end
 
-  def test_throttle_disable_environment_prevents_state_write
+  def test_throttle_cannot_be_disabled_through_the_environment
     Dir.mktmpdir("wrq-throttle-env") do |directory|
-      path = File.join(directory, "never-created")
+      path = File.join(directory, "arxiv.throttle")
       with_env("WRQ_DISABLE_THROTTLE" => "1") do
-        assert_equal 0.0, Wrq::Throttle.new(path: path).wait
+        assert_equal 0.0, Wrq::Throttle.new(path: path, interval: 0).wait
       end
-      refute File.exist?(path)
+      assert File.file?(path)
     end
   end
 

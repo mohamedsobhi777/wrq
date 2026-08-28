@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-# Experimental TUI toolkit for try.rb
+# Small terminal UI toolkit used by the wrq paper selector.
 
 require "io/console"
 #
@@ -8,7 +8,7 @@ require "io/console"
 #   include Tui::Helpers
 #   screen = Tui::Screen.new
 #   line = screen.header.add_line
-#   line.write << Tui::Text.bold("📁 Try Selector")
+#   line.write << Tui::Text.bold("wrq Paper Selector")
 #   search_line = screen.body.add_line
 #   search_line.write_dim("Search:").write(" ")
 #   search_line.write << screen.input("Type to filter…", value: query, cursor: cursor)

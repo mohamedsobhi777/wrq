@@ -68,7 +68,7 @@ class Fuzzy
         results << [entry.data, positions, score]
       end
 
-      # Spinel has no Array#max_by(n); full sort is fine at try-directory scale.
+      # Spinel has no Array#max_by(n); full sort is fine at paper-library scale.
       results.sort_by! { |_, _, score| -score }
       if @limit && @limit < results.length
         limited = []

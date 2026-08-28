@@ -187,6 +187,15 @@ Common options:
 The selector uses `Up`/`Down` or `Ctrl-P`/`Ctrl-N` to navigate, `Enter` to
 select, `Backspace` to edit, and `Esc` to cancel.
 
+## Organization roadmap
+
+The proposed design for organizing one canonical paper library simultaneously
+by topic and by conference/year is documented in
+[`docs/paper-organization.md`](docs/paper-organization.md). It covers
+layout-aware imports, topics, saved collections, managed filesystem views, and
+portable exports, including their safety rules and tradeoffs. These commands
+are a design proposal and are not part of `wrq` 0.1.2.
+
 ## Library layout
 
 The default root is `~/papers`. Override it permanently with `WRQ_PATH` or per
